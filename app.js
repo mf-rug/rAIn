@@ -65,6 +65,7 @@ const DEMO = new URLSearchParams(location.search).has('demo') ? {
   },
 } : null;
 const state = {
+  compare: null,        // KNMI vs Buienradar scores, from job/compare.py
   skill: null,          // recent forecast reliability, from job/verify.py
   src: null,            // 'data' (job output) or 'wms'
   point: null,          // {lat, lng, label}
@@ -730,8 +731,8 @@ async function fetchPlan() {
       const entries = (list, kind) => list.map((e) => [`${kind}|${Date.parse(e.t)}`, DATA + e.file]);
       const extra = (name) => fetch(`${DATA}${name}?v=${Math.floor(Date.now() / 30e3)}`, { cache: 'no-store' })
         .then((r) => (r.ok ? r.json() : null)).catch(() => null);
-      const [skill, coverage] = await Promise.all([extra('skill.json'), extra('coverage.json')]);
-      return { t0, ref: Date.parse(idx.ref), data: [...entries(idx.obs, 'obs'), ...entries(idx.fc, 'fc')], skill, coverage };
+      const [skill, coverage, compare] = await Promise.all([extra('skill.json'), extra('coverage.json'), extra('compare.json')]);
+      return { t0, ref: Date.parse(idx.ref), data: [...entries(idx.obs, 'obs'), ...entries(idx.fc, 'fc')], skill, coverage, compare };
     }
     console.warn('job output is stale; using KNMI directly');
   } catch (e) {
@@ -769,6 +770,7 @@ async function update() {
   }
   store.set('plan', plan);
   state.skill = plan.skill ?? null;
+  state.compare = plan.compare ?? null;
   drawCoverage(plan.coverage ?? store.get('coverage'));
   const { t0, ref } = plan;
   const due = dueAfter(t0, ref);
@@ -910,6 +912,21 @@ function trustAt(pos) {
 const trustOpacity = (v, floor = 0.25) => Math.max(floor, Math.min(1, floor + (1 - floor) * (v - 30) / (GOOD - 30)));
 const trustWord = (v) => `${v >= 70 ? 'high' : v >= 50 ? 'moderate' : v >= 30 ? 'low' : 'very low'} reliability`;
 
+// KNMI vs Buienradar, 1 hour ahead, over the last days (job/compare.py).
+function drawCompare() {
+  const c = state.compare, p = $('versus');
+  const k = c?.knmi?.[12], b = c?.br?.[12];
+  if (!k || !b) { p.hidden = true; return; }
+  p.hidden = false;
+  if (k.events < 150 || k.csi == null || b.csi == null) {
+    p.textContent = `Comparing KNMI and Buienradar forecasts: ${k.events} rain moments scored so far, results after a few rainy days.`;
+    return;
+  }
+  const pct = (v) => `${Math.round(v * 100)}%`;
+  const days = c.days === 1 ? 'today' : `last ${c.days} days`;
+  p.textContent = `Rain correctly forecast 1 hour ahead (${days}): KNMI ${pct(k.csi)} · Buienradar ${pct(b.csi)}.`;
+}
+
 function drawTrust() {
   const r = reliability(state.point);
   const p = $('trust');
@@ -958,6 +975,7 @@ function render() {
   drawGraph(series);
   drawVerdict(series);
   drawTrust();
+  drawCompare();
   drawReadout(series);
 }
 

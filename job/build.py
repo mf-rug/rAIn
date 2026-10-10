@@ -23,6 +23,7 @@ import numpy as np
 from PIL import Image
 from pyproj import Transformer
 
+from compare import Compare
 from verify import Verifier
 
 API = "https://api.dataplatform.knmi.nl/open-data/v1/datasets"
@@ -166,6 +167,7 @@ def main():
     if (OUT / "index.json").exists():
         old = json.loads((OUT / "index.json").read_text())
     verifier = Verifier(OUT, fetch_obs, fetch_run)
+    compare = Compare(OUT)
 
     # Newest observed frame; KNMI publishes ~2 min after the nominal time. If
     # the next frame is due but not out yet, wait for it (up to 2 min). If it
@@ -211,6 +213,7 @@ def main():
             save(grid, name)
             fc.append({"t": iso(t), "file": name})
         verifier.add_run(ref, grids[1:])
+        compare.add_knmi(ref, grids[1:])
         print("forecast run", iso(ref))
 
     changed = old.get("t0") != iso(t0) or old.get("ref") != iso(ref) or len(obs) != len(old.get("obs", []))
@@ -222,6 +225,16 @@ def main():
 
     index = {"generated": iso(datetime.now(timezone.utc)), "t0": iso(t0), "ref": iso(ref), "obs": obs, "fc": fc}
     (OUT / "index.json").write_text(json.dumps(index, separators=(",", ":")))
+
+    # KNMI vs Buienradar: score every new observation, then log Buienradar's
+    # latest forecasts for scoring later.
+    last = datetime.fromisoformat(old["t0"].replace("Z", "+00:00")) if old.get("t0") else t0 - STEP
+    for e in obs:
+        t = datetime.fromisoformat(e["t"].replace("Z", "+00:00"))
+        if t > last:
+            compare.score(t, np.array(Image.open(OUT / e["file"])))
+    compare.fetch_buienradar()
+    compare.save(t0)
 
     # How well recent forecasts held up (needs the frames above, before pruning).
     scored, pending = verifier.update(t0)
