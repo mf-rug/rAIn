@@ -22,7 +22,15 @@
 <body>
   <main class="app">
     <section class="panel" aria-label="Rain forecast for your location">
-      <p class="place"><span id="place">Finding your location…</span><span id="updated"></span></p>
+      <p class="place">
+        <span id="place">Finding your location…</span>
+        <span class="place-right">
+          <span id="updated"></span>
+          <button id="reload" class="reload" type="button" aria-label="Refresh">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path d="M12.2 1.6v2.9H9.3"/></svg>
+          </button>
+        </span>
+      </p>
       <h1 id="verdict" class="verdict">Reading the radar…</h1>
       <p id="detail" class="detail"></p>
       <p id="trust" class="trust" hidden></p>

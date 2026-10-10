@@ -633,6 +633,17 @@ function useFallback(msg) {
 
 $('locate').addEventListener('click', locate);
 
+// Refresh: there's no browser reload in a home-screen app. Re-fetch the app's
+// own files past the browser cache (so a new version shows up right away),
+// forget the stored data list (so data is checked now), then reload.
+$('reload').addEventListener('click', async () => {
+  $('reload').classList.add('spinning');
+  await Promise.all(['./', 'app.js', 'style.css', 'countries.geojson', 'manifest.webmanifest']
+    .map((u) => fetch(u, { cache: 'reload' }).catch(() => {})));
+  store.set('plan', null);
+  location.reload();
+});
+
 // ---------- loading ----------
 
 function showStatus(msg) {
