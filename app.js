@@ -517,7 +517,16 @@ function locate() {
       $('locate').hidden = true;
       setPoint({ lat: p.coords.latitude, lng: p.coords.longitude, label: 'Your location' }, true);
     },
-    () => { clearTimeout(waiting); useFallback('Location is off, so this shows De Bilt. Allow location access, or tap the map to pick a spot.'); },
+    (err) => {
+      clearTimeout(waiting);
+      // Browsers give no second prompt once location is denied, so say where to fix it.
+      const why = {
+        1: 'Location is blocked for this browser, so this shows De Bilt. On iPhone, allow it under Settings → Privacy & Security → Location Services → (your browser) → While Using the App. Or tap the map to pick a spot.',
+        2: 'Your location isn’t available right now, so this shows De Bilt. Tap the map to pick a spot.',
+        3: 'Finding your location took too long, so this shows De Bilt. Try “Use my location” again, or tap the map.',
+      }[err.code] ?? 'Location is off, so this shows De Bilt. Tap the map to pick a spot.';
+      useFallback(why);
+    },
     { enableHighAccuracy: false, timeout: 10000, maximumAge: 10 * 60e3 },
   );
 }
@@ -603,7 +612,7 @@ async function refresh() {
   };
   await Promise.all(Array.from({ length: CONCURRENCY }, worker));
   if (error) failed(error);
-  else if (!/^(Location|Waiting)/.test($('status').textContent)) showStatus('');
+  else if (!/De Bilt/.test($('status').textContent)) showStatus('');
 }
 
 function failed(e) {
