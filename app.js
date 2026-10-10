@@ -49,6 +49,19 @@ const STOPS = [
 ];
 
 const $ = (id) => document.getElementById(id);
+
+// ?demo: fake rain at the point and fake reliability (good for ~50 minutes,
+// then dropping off), to preview how the forecast display looks.
+const DEMO = new URLSearchParams(location.search).has('demo') ? {
+  skill: (() => {
+    const fss = Array.from({ length: 24 }, (_, k) => (k < 6 ? 97 - 3 * k : Math.max(8, 80 - (k - 5) * 5)));
+    return { hours: 6, scored: 72, cell: 4, tile: 10, nx: 18, ny: 19, nl: fss, tiles: Array(18 * 19).fill(fss) };
+  })(),
+  rain(m) { // minutes from now → mm/h
+    const bump = (c, w, h) => h * Math.exp(-(((m - c) / w) ** 2));
+    return bump(-40, 12, 1.2) + bump(35, 14, 3.5) + bump(100, 10, 0.8);
+  },
+} : null;
 const state = {
   skill: null,          // recent forecast reliability, from job/verify.py
   src: null,            // 'data' (job output) or 'wms'
@@ -436,6 +449,9 @@ function drawRadar() {
   else if (a?.tex && t <= 0.5) gpu.draw(a.tex);
   else if (b?.tex) gpu.draw(b.tex);
   else gpu.draw(a?.tex ?? null);
+  // Further-ahead forecasts fade with today's reliability.
+  const trust = trustAt(state.pos);
+  gpu.canvas.style.opacity = trust == null ? 1 : trustOpacity(trust, 0.35);
 }
 
 let drawQueued = false;
@@ -859,7 +875,7 @@ $('play').addEventListener('click', () => {
 const GOOD = 60;   // FSS×100 from which a forecast "held up"
 
 function reliability(pt) {
-  const sk = state.skill;
+  const sk = DEMO?.skill ?? state.skill;
   if (!sk || !pt) return null;
   const [px, py] = pixelOf(pt);
   const tx = Math.floor(px / sk.cell / sk.tile), ty = Math.floor(py / sk.cell / sk.tile);
@@ -877,13 +893,28 @@ function horizon(fss) {
   return k * 5;
 }
 
+// Reliability (FSS×100) at a timeline position, interpolated between lead
+// times; null for the past or when unknown.
+function trustAt(pos) {
+  const r = reliability(state.point);
+  if (!r?.fss || pos <= state.nowIdx) return null;
+  const lead = pos - state.nowIdx;                    // in 5-minute steps
+  if (lead < 1) return r.fss[0] < 0 ? null : 100 + (r.fss[0] - 100) * lead;
+  const k = Math.min(r.fss.length - 1, lead - 1), i = Math.floor(k);
+  const a = r.fss[i], b = r.fss[Math.min(i + 1, r.fss.length - 1)];
+  return a < 0 || b < 0 ? null : a + (b - a) * (k - i);
+}
+
+const trustOpacity = (v, floor = 0.25) => Math.max(floor, Math.min(1, floor + (1 - floor) * (v - 30) / (GOOD - 30)));
+const trustWord = (v) => (v >= 70 ? 'reliable' : v >= 50 ? 'fair' : v >= 30 ? 'rough' : 'guesswork');
+
 function drawTrust() {
   const r = reliability(state.point);
   const p = $('trust');
   if (!r) { p.hidden = true; return; }
   p.hidden = false;
   if (!r.fss) {
-    p.textContent = `Too little rain in the last ${state.skill.hours} hours to judge how reliable forecasts are today.`;
+    p.textContent = `Too little rain in the last ${(DEMO?.skill ?? state.skill).hours} hours to judge how reliable forecasts are today.`;
     return;
   }
   const m = horizon(r.fss);
@@ -910,6 +941,7 @@ function intensity(v) {
 
 // Rain at the point per frame: measured for the past and now, forecast after.
 function pointSeries() {
+  if (DEMO) return state.frames.map((f) => DEMO.rain((f.t - state.t0) / 60e3));
   return state.frames.map((f, i) => {
     if (i <= state.nowIdx) {
       const v = state.observed.get(f.t);
@@ -954,7 +986,7 @@ function monotonePath(pts) {
 
 function drawGraph(series) {
   const w = graph.clientWidth || 360, h = graph.clientHeight || 132;
-  const top = 14, base = h - 22, plot = base - top;
+  const top = 14, base = h - 30, plot = base - top;
   graph.setAttribute('viewBox', `0 0 ${w} ${h}`);
   graph.replaceChildren();
   const n = Math.max(series.length, PAST + 1 + AHEAD);
@@ -992,6 +1024,22 @@ function drawGraph(series) {
     el('text', { x: w, y: y - 4, 'text-anchor': 'end', class: 'band' }, graph).textContent = label;
   }
   el('line', { x1: 0, x2: w, y1: base, y2: base, class: 'grid' }, graph);
+
+  // Reliability strip under the forecast: solid where today's forecasts held
+  // up, fading gradually as they held up less.
+  if (rel?.fss) {
+    const strip = el('linearGradient', { id: 'truststrip', gradientUnits: 'userSpaceOnUse', x1: nowX, y1: 0, x2: w, y2: 0 }, defs);
+    const color = getComputedStyle(document.documentElement).getPropertyValue('--rain').trim();
+    el('stop', { offset: 0, 'stop-color': color }, strip);
+    rel.fss.forEach((v, k) => {
+      const x = cx(state.nowIdx + k + 1);
+      if (x > w || v < 0) return;
+      el('stop', { offset: Math.max(0, Math.min(1, (x - nowX) / (w - nowX))), 'stop-color': color, 'stop-opacity': trustOpacity(v, 0.1) }, strip);
+    });
+    const sy = base + 5;
+    el('rect', { x: nowX, y: sy, width: w - nowX, height: 4, rx: 2, fill: 'url(#truststrip)' }, graph);
+    el('text', { x: nowX - 6, y: sy + 4, 'text-anchor': 'end', class: 'band' }, graph).textContent = 'reliability';
+  }
 
   // Curve per run of loaded values; frames still loading pulse on the baseline.
   let run = [];
@@ -1126,9 +1174,11 @@ function drawReadout(series) {
   const kind = state.pos > state.nowIdx ? 'forecast' : 'radar';
   const when = atNow ? `now (${hhmm(tm)})` : `${hhmm(tm)} ${kind}`;
   const what = v === null ? 'loading…' : v < WET ? 'dry' : `${intensity(v)} rain, ${v.toFixed(1)}\u00a0mm/h`;
+  const trust = trustAt(state.pos);
+  const sure = trust == null || atNow ? '' : ` · ${trustWord(trust)}`;
   const bv = br.series.get(fr[Math.round(state.pos)]?.t);
   const other = bv == null ? '' : ` · Buienradar ${bv < WET ? 'dry' : `${bv.toFixed(1)}\u00a0mm/h`}`;
-  $('readout').textContent = `${when} · ${what}${other}`;
+  $('readout').textContent = `${when} · ${what}${sure}${other}`;
 }
 
 // Scrub the shared timeline by dragging across the graph; it moves continuously.
