@@ -906,7 +906,7 @@ function trustAt(pos) {
 }
 
 const trustOpacity = (v, floor = 0.25) => Math.max(floor, Math.min(1, floor + (1 - floor) * (v - 30) / (GOOD - 30)));
-const trustWord = (v) => (v >= 70 ? 'reliable' : v >= 50 ? 'fair' : v >= 30 ? 'rough' : 'guesswork');
+const trustWord = (v) => `${v >= 70 ? 'high' : v >= 50 ? 'moderate' : v >= 30 ? 'low' : 'very low'} reliability`;
 
 function drawTrust() {
   const r = reliability(state.point);
