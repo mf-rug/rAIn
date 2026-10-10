@@ -116,6 +116,7 @@ html, body {
 #graph .curve { fill: none; stroke: url(#rainfill); stroke-width: 1.5; stroke-linejoin: round; }
 #graph .past { opacity: 0.45; }
 #graph .br { fill: none; stroke: var(--ink); stroke-width: 1.25; stroke-dasharray: 3 2; opacity: 0.6; }
+#graph .dwd { fill: none; stroke: var(--downpour); stroke-width: 1.5; stroke-dasharray: 0.5 3; stroke-linecap: round; opacity: 0.8; }
 #graph .pending { stroke: var(--line); stroke-width: 3; stroke-linecap: round; }
 
 .readout {

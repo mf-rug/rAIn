@@ -23,6 +23,7 @@ import numpy as np
 from PIL import Image
 from pyproj import Transformer
 
+import dwd
 from compare import Compare
 from verify import Verifier
 
@@ -223,11 +224,27 @@ def main():
     if COVERAGE:
         (OUT / "coverage.json").write_text(json.dumps(COVERAGE, separators=(",", ":")))
 
+    # DWD's nowcast: a compact image for the app's comparison line, and its
+    # values for the head-to-head. Optional: the app works without it.
+    dwd_meta = old.get("dwd")
+    try:
+        dwd_ref, dwd_grids = dwd.fetch()
+        name = f"dwd-{dwd_ref:%Y%m%d%H%M}.png"
+        if not (OUT / name).exists():
+            dwd.atlas(dwd_grids).save(OUT / name, optimize=True)
+        compare.add_dwd(dwd_ref, dwd_grids)
+        dwd_meta = {"file": name, "ref": iso(dwd_ref), **dwd.ATLAS}
+        print("dwd run", iso(dwd_ref))
+    except Exception as e:
+        print("dwd unavailable:", e)
+
     index = {"generated": iso(datetime.now(timezone.utc)), "t0": iso(t0), "ref": iso(ref), "obs": obs, "fc": fc}
+    if dwd_meta:
+        index["dwd"] = dwd_meta
     (OUT / "index.json").write_text(json.dumps(index, separators=(",", ":")))
 
-    # KNMI vs Buienradar: store both forecasts as they stand now, then score
-    # every new observation against what both said 5 … 120 minutes earlier.
+    # KNMI vs Buienradar (vs DWD): store the forecasts as they stand now, then
+    # score every new observation against what they said 5 … 120 minutes earlier.
     compare.snapshot(t0)
     last = datetime.fromisoformat(old["t0"].replace("Z", "+00:00")) if old.get("t0") else t0 - STEP
     for e in obs:
@@ -243,7 +260,7 @@ def main():
     if skill:
         (OUT / "skill.json").write_text(json.dumps(skill, separators=(",", ":")))
 
-    keep = {"index.json"} | {e["file"] for e in obs + fc}
+    keep = {"index.json"} | {e["file"] for e in obs + fc} | ({dwd_meta["file"]} if dwd_meta else set())
     for p in OUT.glob("*.png"):
         if p.name not in keep:
             p.unlink()

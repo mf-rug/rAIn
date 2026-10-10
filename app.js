@@ -685,6 +685,44 @@ async function loadBuienradar(force) {
   }
 }
 
+// ---------- DWD comparison ----------
+// DWD's nowcast (job/dwd.py): all 25 steps for the Netherlands area at ~2 km,
+// stacked in one greyscale image. 255 = DWD has no data there (west NL).
+
+const dwd = { url: null, meta: null, bytes: null };
+
+async function loadDwd(meta) {
+  if (!meta || meta.url === dwd.url) return;
+  try {
+    const img = await cachedImage(meta.url, { colorSpaceConversion: 'none', premultiplyAlpha: 'none' });
+    const ctx = new OffscreenCanvas(img.width, img.height).getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(img, 0, 0);
+    const d = ctx.getImageData(0, 0, img.width, img.height).data;
+    const bytes = new Uint8Array(img.width * img.height);
+    for (let i = 0; i < bytes.length; i++) bytes[i] = d[i * 4];
+    Object.assign(dwd, { url: meta.url, meta, bytes });
+    render();
+  } catch (e) {
+    console.warn('DWD unavailable', e);
+  }
+}
+
+// DWD's values at the point: time → mm/h (no entries where DWD has no data).
+function dwdSeries(pt) {
+  const out = new Map();
+  const m = dwd.meta;
+  if (!m || !dwd.bytes || !pt) return out;
+  const [px, py] = pixelOf(pt);
+  const ax = Math.floor((px - m.x0) / m.step), ay = Math.floor((py - m.y0) / m.step);
+  if (ax < 0 || ay < 0 || ax >= m.w || ay >= m.h) return out;
+  const ref = Date.parse(m.ref);
+  for (let i = 0; i < 25; i++) {
+    const b = dwd.bytes[(i * m.h + ay) * m.w + ax];
+    if (b !== 255) out.set(ref + i * STEP, fromByte(b));
+  }
+  return out;
+}
+
 // ---------- loading indicator ----------
 
 const loading = { started: 0, timer: null, error: '' };
@@ -732,7 +770,8 @@ async function fetchPlan() {
       const extra = (name) => fetch(`${DATA}${name}?v=${Math.floor(Date.now() / 30e3)}`, { cache: 'no-store' })
         .then((r) => (r.ok ? r.json() : null)).catch(() => null);
       const [skill, coverage, compare] = await Promise.all([extra('skill.json'), extra('coverage.json'), extra('compare.json')]);
-      return { t0, ref: Date.parse(idx.ref), data: [...entries(idx.obs, 'obs'), ...entries(idx.fc, 'fc')], skill, coverage, compare };
+      const dwd = idx.dwd ? { ...idx.dwd, url: DATA + idx.dwd.file } : null;
+      return { t0, ref: Date.parse(idx.ref), data: [...entries(idx.obs, 'obs'), ...entries(idx.fc, 'fc')], skill, coverage, compare, dwd };
     }
     console.warn('job output is stale; using KNMI directly');
   } catch (e) {
@@ -771,6 +810,7 @@ async function update() {
   store.set('plan', plan);
   state.skill = plan.skill ?? null;
   state.compare = plan.compare ?? null;
+  loadDwd(plan.dwd);
   drawCoverage(plan.coverage ?? store.get('coverage'));
   const { t0, ref } = plan;
   const due = dueAfter(t0, ref);
@@ -924,7 +964,10 @@ function drawCompare() {
   }
   const pct = (v) => `${Math.round(v * 100)}%`;
   const days = c.days === 1 ? 'today' : `last ${c.days} days`;
-  p.textContent = `Rain correctly forecast 1 hour ahead (${days}): KNMI ${pct(k.csi)} · Buienradar ${pct(b.csi)}.`;
+  const e = c.east, ek = e?.knmi?.[12], eb = e?.br?.[12], ed = e?.dwd?.[12];
+  const east = ek && ed && ek.events >= 150 && ek.csi != null && eb.csi != null && ed.csi != null
+    ? ` Eastern NL, where DWD covers too: KNMI ${pct(ek.csi)} · Buienradar ${pct(eb.csi)} · DWD ${pct(ed.csi)}.` : '';
+  p.textContent = `Rain correctly forecast 1 hour ahead (${days}): KNMI ${pct(k.csi)} · Buienradar ${pct(b.csi)}.${east}`;
 }
 
 function drawTrust() {
@@ -1095,8 +1138,20 @@ function drawGraph(series) {
   });
   if (brPts.length > 1) {
     el('path', { d: monotonePath(brPts), class: 'br' }, graph);
-    el('line', { x1: 0, x2: 14, y1: 5, y2: 5, class: 'br' }, graph);
-    el('text', { x: 18, y: 8, class: 'band' }, graph).textContent = 'Buienradar';
+    el('line', { x1: w - 142, x2: w - 128, y1: 5, y2: 5, class: 'br' }, graph);
+    el('text', { x: w - 124, y: 8, class: 'band' }, graph).textContent = 'Buienradar';
+  }
+  // DWD's forecast, where it covers the point (eastern Netherlands).
+  const dw = dwdSeries(state.point);
+  const dwPts = [];
+  state.frames.forEach((f, i) => {
+    const v = dw.get(f.t);
+    if (v != null && i >= state.nowIdx) dwPts.push([cx(i), yOf(v)]);
+  });
+  if (dwPts.length > 1) {
+    el('path', { d: monotonePath(dwPts), class: 'dwd' }, graph);
+    el('line', { x1: w - 42, x2: w - 28, y1: 5, y2: 5, class: 'dwd' }, graph);
+    el('text', { x: w, y: 8, 'text-anchor': 'end', class: 'band' }, graph).textContent = 'DWD';
   }
 
   el('line', { x1: nowX, x2: nowX, y1: 2, y2: base, class: 'now' }, graph);
@@ -1197,7 +1252,9 @@ function drawReadout(series) {
   const trust = trustAt(state.pos);
   const sure = trust == null || atNow ? '' : ` · ${trustWord(trust)}`;
   const bv = br.series.get(fr[Math.round(state.pos)]?.t);
-  const other = bv == null ? '' : ` · Buienradar ${bv < WET ? 'dry' : `${bv.toFixed(1)}\u00a0mm/h`}`;
+  const dv = dwdSeries(state.point).get(fr[Math.round(state.pos)]?.t);
+  const fmt = (x) => (x < WET ? 'dry' : `${x.toFixed(1)}\u00a0mm/h`);
+  const other = (bv == null ? '' : ` · Buienradar ${fmt(bv)}`) + (dv == null || Math.round(state.pos) < state.nowIdx ? '' : ` · DWD ${fmt(dv)}`);
   $('readout').textContent = `${when} · ${what}${sure}${other}`;
 }
 
