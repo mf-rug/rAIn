@@ -226,14 +226,14 @@ def main():
     index = {"generated": iso(datetime.now(timezone.utc)), "t0": iso(t0), "ref": iso(ref), "obs": obs, "fc": fc}
     (OUT / "index.json").write_text(json.dumps(index, separators=(",", ":")))
 
-    # KNMI vs Buienradar: score every new observation, then log Buienradar's
-    # latest forecasts for scoring later.
+    # KNMI vs Buienradar: log Buienradar's latest forecasts (its first step is
+    # its view of now, scored as lead 0), then score every new observation.
+    compare.fetch_buienradar()
     last = datetime.fromisoformat(old["t0"].replace("Z", "+00:00")) if old.get("t0") else t0 - STEP
     for e in obs:
         t = datetime.fromisoformat(e["t"].replace("Z", "+00:00"))
         if t > last:
             compare.score(t, np.array(Image.open(OUT / e["file"])))
-    compare.fetch_buienradar()
     compare.save(t0)
 
     # How well recent forecasts held up (needs the frames above, before pruning).
