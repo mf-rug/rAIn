@@ -226,9 +226,9 @@ def main():
     index = {"generated": iso(datetime.now(timezone.utc)), "t0": iso(t0), "ref": iso(ref), "obs": obs, "fc": fc}
     (OUT / "index.json").write_text(json.dumps(index, separators=(",", ":")))
 
-    # KNMI vs Buienradar: log Buienradar's latest forecasts (its first step is
-    # its view of now, scored as lead 0), then score every new observation.
-    compare.fetch_buienradar()
+    # KNMI vs Buienradar: store both forecasts as they stand now, then score
+    # every new observation against what both said 5 … 120 minutes earlier.
+    compare.snapshot(t0)
     last = datetime.fromisoformat(old["t0"].replace("Z", "+00:00")) if old.get("t0") else t0 - STEP
     for e in obs:
         t = datetime.fromisoformat(e["t"].replace("Z", "+00:00"))

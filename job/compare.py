@@ -1,18 +1,20 @@
 """Head-to-head: KNMI's nowcast vs Buienradar's, scored against what fell.
 
-Every run, Buienradar's point forecast is fetched for a fixed set of places
-across the Netherlands, and KNMI's forecast is read at the same places from the
-run the job already downloads. When an observation arrives, both are compared
-with it at the same places and lead times (only pairs where both exist), and
-daily tallies are kept per lead time:
+Every run (at moment F, the newest radar time) both sources' forecasts as they
+stand at F are stored for a fixed set of places across the Netherlands:
+Buienradar's point forecast, and KNMI's latest run read at the same places. When
+the observation for time t arrives, both are scored with what they said at
+F = t - 5, 10, … 120 min ("had you looked at F, who was right?"), only where
+both made a forecast, with daily tallies per lead time:
 
   hits, misses, false alarms, correct negatives   (rain = WET_MMH or more)
   sum of absolute errors (mm/h) and number of pairs
 
-Lead 0 is Buienradar's own "now" vs KNMI's observation: how much the two
-disagree about the present, independent of forecasting. KNMI's forecast starts
-from the very observation it is scored against, so it has a head start that
-lead 0 helps put in proportion.
+Lead 0 is Buienradar's own recent observations (its response starts with its
+last few observed steps) vs KNMI's for the same times: how much the two disagree
+about rain that has already fallen. KNMI's forecast starts from the very
+observations it is scored against, so it has a head start that lead 0 helps put
+in proportion.
 
 State in OUT/state/compare.json; summary for the app in OUT/compare.json.
 """
@@ -69,33 +71,41 @@ class Compare:
         self.path = out / "state" / "compare.json"
         self.out = out
         s = json.loads(self.path.read_text()) if self.path.exists() else {}
-        self.br = s.get("br", {})        # issue time → per place, values for leads 0..36
-        self.knmi = s.get("knmi", {})    # run time → per place, values for leads 1..24
+        self.br = s.get("br", {})        # F → {"obs": {t: [per place]}, "fc": {t: [per place]}}
+        self.knmi = s.get("knmi", {})    # F → {t: [per place]}
+        self.latest = s.get("latest", {})  # KNMI's newest run: {t: [per place]}
         self.days = s.get("days", {})    # day → {"br"|"knmi": [[h, m, f, cn, abs, n] per lead 0..24]}
-
-    def fetch_buienradar(self):
-        """Buienradar's forecast for every place; issue time = its first timestep."""
-        got = {}
-        for i, (la, lo) in enumerate(POINTS):
-            try:
-                with urllib.request.urlopen(f"{BUIENRADAR}?lat={la}&lon={lo}", timeout=10) as r:
-                    fs = json.load(r)["forecasts"]
-            except Exception as e:  # one place failing shouldn't stop the rest
-                print("buienradar", la, lo, e)
-                continue
-            t_first = datetime.fromisoformat(fs[0]["utcdatetime"]).replace(tzinfo=timezone.utc)
-            series = got.setdefault(key(t_first), [None] * len(POINTS))
-            series[i] = [f["precipitation"] for f in fs]
-            time.sleep(0.1)
-        self.br.update(got)
+        # Drop state from the earlier, differently keyed format.
+        if any(not isinstance(v, dict) or "fc" not in v for v in self.br.values()):
+            self.br, self.knmi, self.days = {}, {}, {}
 
     def add_knmi(self, ref, grids):
         """KNMI forecast run (byte grids for leads 1..24) at the places."""
-        self.knmi[key(ref)] = [list(v) for v in zip(*[mmh(g) for g in grids])]
+        self.latest = {key(ref + (i + 1) * STEP): mmh(g) for i, g in enumerate(grids)}
+
+    def snapshot(self, f):
+        """Store both sources' forecasts as they stand at moment f."""
+        self.knmi[key(f)] = self.latest
+        obs, fc = {}, {}
+        now = datetime.now(timezone.utc)
+        for i, (la, lo) in enumerate(POINTS):
+            try:
+                with urllib.request.urlopen(f"{BUIENRADAR}?lat={la}&lon={lo}", timeout=10) as r:
+                    steps = json.load(r)["forecasts"]
+            except Exception as e:  # one place failing shouldn't stop the rest
+                print("buienradar", la, lo, e)
+                continue
+            for st in steps:
+                t = datetime.fromisoformat(st["utcdatetime"]).replace(tzinfo=timezone.utc)
+                # Steps up to now are Buienradar's observations, later ones its forecast.
+                (obs if t <= now else fc).setdefault(key(t), [None] * len(POINTS))[i] = st["precipitation"]
+            time.sleep(0.1)
+        self.br[key(f)] = {"obs": obs, "fc": fc}
 
     def score(self, t, grid):
         """Score both sources against the observation at t (byte grid)."""
         obs = mmh(grid)
+        tk = key(t)
         day = self.days.setdefault(t.strftime("%Y-%m-%d"), {
             "br": [[0] * 6 for _ in range(LEADS + 1)],
             "knmi": [[0] * 6 for _ in range(LEADS + 1)],
@@ -107,28 +117,34 @@ class Compare:
             row[4] += abs(f - o)
             row[5] += 1
 
-        for k in range(LEADS + 1):
-            b = self.br.get(key(t - k * STEP))
-            kn = self.knmi.get(key(t - k * STEP)) if k else None
+        # Lead 0: Buienradar's own observation of t (from the newest snapshot that has it).
+        for f in sorted(self.br, reverse=True):
+            seen = self.br[f]["obs"].get(tk)
+            if seen:
+                for p, v in enumerate(seen):
+                    if v is not None:
+                        tally(day["br"][0], v, obs[p])
+                break
+        for k in range(1, LEADS + 1):
+            f = key(t - k * STEP)
+            b = self.br.get(f, {}).get("fc", {}).get(tk)
+            kn = self.knmi.get(f, {}).get(tk)
+            if not b or not kn:
+                continue
             for p in range(len(POINTS)):
-                bv = b[p][k] if b and b[p] and k < len(b[p]) else None
-                if k == 0:
-                    if bv is not None:
-                        tally(day["br"][0], bv, obs[p])
-                    continue
-                kv = kn[p][k - 1] if kn else None
-                if bv is None or kv is None:
+                if b[p] is None or kn[p] is None:
                     continue      # only compare where both made a forecast
-                tally(day["br"][k], bv, obs[p])
-                tally(day["knmi"][k], kv, obs[p])
+                tally(day["br"][k], b[p], obs[p])
+                tally(day["knmi"][k], kn[p], obs[p])
 
     def save(self, t0):
-        old = key(t0 - timedelta(hours=3))
+        old = key(t0 - timedelta(hours=2, minutes=10))
         self.br = {k: v for k, v in self.br.items() if k >= old}
         self.knmi = {k: v for k, v in self.knmi.items() if k >= old}
         cutoff = (t0 - timedelta(days=KEEP_DAYS)).strftime("%Y-%m-%d")
         self.days = {d: v for d, v in self.days.items() if d >= cutoff}
-        self.path.write_text(json.dumps({"br": self.br, "knmi": self.knmi, "days": self.days}, separators=(",", ":")))
+        self.path.write_text(json.dumps(
+            {"br": self.br, "knmi": self.knmi, "latest": self.latest, "days": self.days}, separators=(",", ":")))
 
         # Summary over the last DAYS days, per source and lead time.
         since = (t0 - timedelta(days=DAYS)).strftime("%Y-%m-%d")
