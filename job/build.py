@@ -23,6 +23,8 @@ import numpy as np
 from PIL import Image
 from pyproj import Transformer
 
+from verify import Verifier
+
 API = "https://api.dataplatform.knmi.nl/open-data/v1/datasets"
 OBS = "nl_rdr_data_rtcor_5m/versions/1.0"      # gauge-corrected 5-min rain, real time
 FC = "radar_forecast/versions/2.0"             # 2-hour nowcast from the same product line
@@ -107,11 +109,37 @@ def save(grid, name):
     Image.fromarray(grid, "L").save(OUT / name, optimize=True)
 
 
+def fetch_obs(t):
+    """Observed frame at t as a byte grid, from our own PNG if we still have it."""
+    png = OUT / f"obs-{t:%Y%m%d%H%M}.png"
+    if png.exists():
+        return np.array(Image.open(png))
+    try:
+        f = download(OBS, f"RAD_NL25_RAC_RT_{t:%Y%m%d%H%M}.h5")
+    except urllib.error.HTTPError as e:
+        if e.code in (403, 404):
+            raise FileNotFoundError(t) from e
+        raise
+    return encode(f["image1/image_data"][:])
+
+
+def fetch_run(ref):
+    """Byte grids for a forecast run's leads 1..24 (+5 … +120 min)."""
+    try:
+        f = download(FC, f"RAD_NL25_RAC_FM_{ref:%Y%m%d%H%M}.h5")
+    except urllib.error.HTTPError as e:
+        if e.code in (403, 404):
+            raise FileNotFoundError(ref) from e
+        raise
+    return [encode(f[f"image{i}/image_data"][:]) for i in range(2, 26)]
+
+
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
     old = {}
     if (OUT / "index.json").exists():
         old = json.loads((OUT / "index.json").read_text())
+    verifier = Verifier(OUT, fetch_obs, fetch_run)
 
     # Newest observed frame; KNMI publishes ~2 min after the nominal time. If
     # the next frame is due but not out yet, wait for it (up to 2 min). If it
@@ -131,12 +159,13 @@ def main():
         name = f"obs-{t:%Y%m%d%H%M}.png"
         if not (OUT / name).exists():
             try:
-                f = download(OBS, f"RAD_NL25_RAC_RT_{t:%Y%m%d%H%M}.h5")
-                save(encode(f["image1/image_data"][:]), name)
-                print("obs", name)
-            except urllib.error.HTTPError as e:
-                print("obs missing", name, e.code)
+                grid = fetch_obs(t)
+            except FileNotFoundError:
+                print("obs missing", name)
                 continue
+            save(grid, name)
+            verifier.add_obs(t, grid)
+            print("obs", name)
         obs.append({"t": iso(t), "file": name})
 
     # Newest forecast run: image1 is the analysis at the run time, 2..25 are
@@ -149,11 +178,13 @@ def main():
         fc = old["fc"]
     else:
         f = download(FC, fc_name)
-        for i in range(1, 26):
-            t = ref + (i - 1) * STEP
+        grids = [encode(f[f"image{i}/image_data"][:]) for i in range(1, 26)]
+        for i, grid in enumerate(grids):
+            t = ref + i * STEP
             name = f"fc-{ref:%Y%m%d%H%M}-{t:%Y%m%d%H%M}.png"
-            save(encode(f[f"image{i}/image_data"][:]), name)
+            save(grid, name)
             fc.append({"t": iso(t), "file": name})
+        verifier.add_run(ref, grids[1:])
         print("forecast run", iso(ref))
 
     changed = old.get("t0") != iso(t0) or old.get("ref") != iso(ref) or len(obs) != len(old.get("obs", []))
@@ -163,11 +194,19 @@ def main():
     index = {"generated": iso(datetime.now(timezone.utc)), "t0": iso(t0), "ref": iso(ref), "obs": obs, "fc": fc}
     (OUT / "index.json").write_text(json.dumps(index, separators=(",", ":")))
 
+    # How well recent forecasts held up (needs the frames above, before pruning).
+    scored, pending = verifier.update(t0)
+    verifier.save()
+    skill = verifier.summary(t0)
+    if skill:
+        (OUT / "skill.json").write_text(json.dumps(skill, separators=(",", ":")))
+
     keep = {"index.json"} | {e["file"] for e in obs + fc}
     for p in OUT.glob("*.png"):
         if p.name not in keep:
             p.unlink()
-    finish(True, f"t0 {index['t0']} ref {index['ref']} frames {len(obs) + len(fc)}")
+    finish(True, f"t0 {index['t0']} ref {index['ref']} frames {len(obs) + len(fc)}; "
+                 f"verified {scored} new times, {pending} pending, {verifier.budget} downloads left")
 
 
 def finish(changed, msg):

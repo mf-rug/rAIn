@@ -50,6 +50,7 @@ const STOPS = [
 
 const $ = (id) => document.getElementById(id);
 const state = {
+  skill: null,          // recent forecast reliability, from job/verify.py
   src: null,            // 'data' (job output) or 'wms'
   point: null,          // {lat, lng, label}
   frames: [],           // ordered by time
@@ -680,7 +681,9 @@ async function fetchPlan() {
     const t0 = Date.parse(idx.t0);
     if (Date.now() - t0 < DATA_STALE) {
       const entries = (list, kind) => list.map((e) => [`${kind}|${Date.parse(e.t)}`, DATA + e.file]);
-      return { t0, ref: Date.parse(idx.ref), data: [...entries(idx.obs, 'obs'), ...entries(idx.fc, 'fc')] };
+      const skill = await fetch(`${DATA}skill.json?v=${Math.floor(Date.now() / 30e3)}`, { cache: 'no-store' })
+        .then((r) => (r.ok ? r.json() : null)).catch(() => null);
+      return { t0, ref: Date.parse(idx.ref), data: [...entries(idx.obs, 'obs'), ...entries(idx.fc, 'fc')], skill };
     }
     console.warn('job output is stale; using KNMI directly');
   } catch (e) {
@@ -717,6 +720,7 @@ async function update() {
     return failed(e);
   }
   store.set('plan', plan);
+  state.skill = plan.skill ?? null;
   const { t0, ref } = plan;
   const due = dueAfter(t0, ref);
   state.nextCheck = Date.now() < due ? due : Date.now() + POLL_EVERY;
@@ -816,6 +820,48 @@ $('play').addEventListener('click', () => {
   requestAnimationFrame(tick);
 });
 
+// ---------- forecast reliability ----------
+// job/verify.py scores how well recent forecasts held up per lead time (FSS,
+// 0–100) for ~40 km tiles around each place. Here: the values for the tile the
+// point is in, or for the whole country when the local area had too little rain.
+
+const GOOD = 60;   // FSS×100 from which a forecast "held up"
+
+function reliability(pt) {
+  const sk = state.skill;
+  if (!sk || !pt) return null;
+  const [px, py] = pixelOf(pt);
+  const tx = Math.floor(px / sk.cell / sk.tile), ty = Math.floor(py / sk.cell / sk.tile);
+  const local = tx >= 0 && ty >= 0 && tx < sk.nx && ty < sk.ny ? sk.tiles[ty * sk.nx + tx] : null;
+  const known = (a) => a && a.filter((v) => v >= 0).length >= a.length / 2;
+  if (known(local)) return { fss: local, area: 'here' };
+  if (known(sk.nl)) return { fss: sk.nl, area: 'the Netherlands' };
+  return { fss: null, area: null };
+}
+
+// Minutes ahead for which forecasts kept scoring GOOD (0 if not even 5 min).
+function horizon(fss) {
+  let k = 0;
+  while (k < fss.length && fss[k] >= GOOD) k++;
+  return k * 5;
+}
+
+function drawTrust() {
+  const r = reliability(state.point);
+  const p = $('trust');
+  if (!r) { p.hidden = true; return; }
+  p.hidden = false;
+  if (!r.fss) {
+    p.textContent = `Too little rain in the last ${state.skill.hours} hours to judge how reliable forecasts are today.`;
+    return;
+  }
+  const m = horizon(r.fss);
+  const where = r.area === 'here' ? '' : ` across ${r.area}`;
+  p.textContent = m >= 120 ? `Today's forecasts${where} held up well for the full 2 hours.`
+    : m >= 10 ? `Today's forecasts${where} held up well for about ${m} minutes; less reliable beyond.`
+    : `Today's forecasts${where} have been unreliable, even 10 minutes ahead.`;
+}
+
 // ---------- graph & verdict ----------
 
 const NS = 'http://www.w3.org/2000/svg';
@@ -846,6 +892,7 @@ function render() {
   const series = pointSeries();
   drawGraph(series);
   drawVerdict(series);
+  drawTrust();
   drawReadout(series);
 }
 
@@ -894,6 +941,19 @@ function drawGraph(series) {
   }
   el('rect', { x: 0, y: 0, width: nowX, height: h }, el('clipPath', { id: 'clip-past' }, defs));
   el('rect', { x: nowX, y: 0, width: w - nowX, height: h }, el('clipPath', { id: 'clip-ahead' }, defs));
+  // Forecast fades out with today's reliability at each lead time.
+  const rel = reliability(state.point);
+  if (rel?.fss) {
+    const fade = el('linearGradient', { id: 'trustfade', gradientUnits: 'userSpaceOnUse', x1: nowX, y1: 0, x2: w, y2: 0 }, defs);
+    el('stop', { offset: 0, 'stop-color': '#fff' }, fade);
+    rel.fss.forEach((v, k) => {
+      const x = cx(state.nowIdx + k + 1);
+      if (x > w || v < 0) return;
+      const op = Math.max(0.25, Math.min(1, 0.25 + 0.75 * (v - 30) / (GOOD - 30)));
+      el('stop', { offset: Math.max(0, Math.min(1, (x - nowX) / (w - nowX))), 'stop-color': '#fff', 'stop-opacity': op }, fade);
+    });
+    el('rect', { x: nowX, y: 0, width: w - nowX, height: h, fill: 'url(#trustfade)' }, el('mask', { id: 'trust-mask', maskUnits: 'userSpaceOnUse', x: 0, y: 0, width: w, height: h }, defs));
+  }
 
   for (const [v, label] of [[1, 'moderate'], [5, 'heavy']]) {
     const y = yOf(v);
@@ -910,6 +970,7 @@ function drawGraph(series) {
       const area = `${line}L${run[run.length - 1][0]},${base}L${run[0][0]},${base}Z`;
       for (const [clip, cls] of [['clip-past', 'past'], ['clip-ahead', '']]) {
         const g = el('g', { 'clip-path': `url(#${clip})`, class: cls }, graph);
+        if (clip === 'clip-ahead' && rel?.fss) g.setAttribute('mask', 'url(#trust-mask)');
         el('path', { d: area, class: 'area' }, g);
         el('path', { d: line, class: 'curve' }, g);
       }

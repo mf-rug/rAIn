@@ -87,6 +87,13 @@ html, body {
   font-size: 15px;
 }
 
+.trust {
+  margin: 6px 0 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+.trust[hidden] { display: none; }
+
 .graph { margin: 14px 0 0; }
 
 #graph {
