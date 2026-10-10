@@ -90,6 +90,29 @@ def build_lookup():
 
 
 LOOKUP = None
+STERE = "+proj=stere +lat_0=90 +lon_0=0 +lat_ts=60 +a=6378137 +b=6356752 +x_0=0 +y_0=0 +units=km"
+COVERAGE = None   # outline of the area the radars actually see, from the latest observation
+
+
+def coverage_outline(valid):
+    """Outline of the valid pixels of a KNMI grid as [lat, lon] points.
+
+    The covered area is the union of the radars' ranges clipped to the grid,
+    so every row is one interval: trace the left edges down, the right edges up.
+    """
+    rows = np.flatnonzero(valid.any(axis=1))
+    if not len(rows):
+        return None
+    picks = sorted(set(rows[::4].tolist()) | {int(rows[0]), int(rows[-1])})
+    left, right = [], []
+    for r in picks:
+        cols = np.flatnonzero(valid[r])
+        left.append((cols[0], r))
+        right.append((cols[-1] + 1, r))
+    pts = left + right[::-1]
+    to_ll = Transformer.from_crs(STERE, "EPSG:4326", always_xy=True)
+    lon, lat = to_ll.transform([x for x, _ in pts], [-3650 - r for _, r in pts])
+    return [[round(a, 4), round(o, 4)] for a, o in zip(lat, lon)]
 
 
 def encode(raw):
@@ -114,13 +137,16 @@ def fetch_obs(t):
     png = OUT / f"obs-{t:%Y%m%d%H%M}.png"
     if png.exists():
         return np.array(Image.open(png))
+    global COVERAGE
     try:
         f = download(OBS, f"RAD_NL25_RAC_RT_{t:%Y%m%d%H%M}.h5")
     except urllib.error.HTTPError as e:
         if e.code in (403, 404):
             raise FileNotFoundError(t) from e
         raise
-    return encode(f["image1/image_data"][:])
+    raw = f["image1/image_data"][:]
+    COVERAGE = COVERAGE or coverage_outline(raw < 65534)
+    return encode(raw)
 
 
 def fetch_run(ref):
@@ -190,6 +216,9 @@ def main():
     changed = old.get("t0") != iso(t0) or old.get("ref") != iso(ref) or len(obs) != len(old.get("obs", []))
     if not changed:
         return finish(False, f"nothing new; t0 {iso(t0)} ref {iso(ref)}")
+
+    if COVERAGE:
+        (OUT / "coverage.json").write_text(json.dumps(COVERAGE, separators=(",", ":")))
 
     index = {"generated": iso(datetime.now(timezone.utc)), "t0": iso(t0), "ref": iso(ref), "obs": obs, "fc": fc}
     (OUT / "index.json").write_text(json.dumps(index, separators=(",", ":")))

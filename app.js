@@ -527,6 +527,35 @@ async function highlightCountry(pt) {
 }
 dark.addEventListener('change', () => { homeName = null; if (state.point) highlightCountry(state.point); });
 
+// Radar coverage: outside the area the radars see there is no data, which must
+// not look like "dry". Hatched, under the radar layer like the country veil.
+let coverageLayers = [], coverageKey = '';
+
+function drawCoverage(ring) {
+  if (!ring?.length) return;
+  store.set('coverage', ring);
+  const key = `${ring.length}|${ring[0]}|${dark.matches}`;
+  if (key === coverageKey) return;
+  coverageKey = key;
+  coverageLayers.forEach((l) => l.remove());
+  const css = getComputedStyle(document.documentElement);
+  const world = [[-85, -180], [-85, 180], [85, 180], [85, -180]];
+  coverageLayers = [
+    L.polygon([world, ring], { pane: 'veil', stroke: false, fillColor: 'url(#nodata-hatch)', fillOpacity: 1, interactive: false }),
+    L.polygon(ring, { pane: 'veil', fill: false, color: css.getPropertyValue('--muted').trim(), weight: 1, opacity: 0.6, dashArray: '4 3', interactive: false }),
+  ];
+  coverageLayers.forEach((l) => l.addTo(map));
+  // The hatch pattern has to live in the same SVG as the polygon.
+  const svg = map.getRenderer(coverageLayers[0])._container;
+  svg.querySelector('#nodata-hatch')?.parentNode.remove();
+  const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+  defs.innerHTML = `<pattern id="nodata-hatch" width="7" height="7" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+    <rect width="7" height="7" fill="${css.getPropertyValue('--sky').trim()}" fill-opacity="0.6"/>
+    <line x1="0" y1="0" x2="0" y2="7" stroke="${css.getPropertyValue('--muted').trim()}" stroke-width="1.5" stroke-opacity="0.35"/></pattern>`;
+  svg.insertBefore(defs, svg.firstChild);
+}
+dark.addEventListener('change', () => drawCoverage(store.get('coverage')));
+
 const marker = L.marker([FALLBACK.lat, FALLBACK.lng], {
   icon: L.divIcon({ className: 'here', iconSize: [14, 14] }),
   keyboard: false, interactive: false,
@@ -681,9 +710,10 @@ async function fetchPlan() {
     const t0 = Date.parse(idx.t0);
     if (Date.now() - t0 < DATA_STALE) {
       const entries = (list, kind) => list.map((e) => [`${kind}|${Date.parse(e.t)}`, DATA + e.file]);
-      const skill = await fetch(`${DATA}skill.json?v=${Math.floor(Date.now() / 30e3)}`, { cache: 'no-store' })
+      const extra = (name) => fetch(`${DATA}${name}?v=${Math.floor(Date.now() / 30e3)}`, { cache: 'no-store' })
         .then((r) => (r.ok ? r.json() : null)).catch(() => null);
-      return { t0, ref: Date.parse(idx.ref), data: [...entries(idx.obs, 'obs'), ...entries(idx.fc, 'fc')], skill };
+      const [skill, coverage] = await Promise.all([extra('skill.json'), extra('coverage.json')]);
+      return { t0, ref: Date.parse(idx.ref), data: [...entries(idx.obs, 'obs'), ...entries(idx.fc, 'fc')], skill, coverage };
     }
     console.warn('job output is stale; using KNMI directly');
   } catch (e) {
@@ -721,6 +751,7 @@ async function update() {
   }
   store.set('plan', plan);
   state.skill = plan.skill ?? null;
+  drawCoverage(plan.coverage ?? store.get('coverage'));
   const { t0, ref } = plan;
   const due = dueAfter(t0, ref);
   state.nextCheck = Date.now() < due ? due : Date.now() + POLL_EVERY;
