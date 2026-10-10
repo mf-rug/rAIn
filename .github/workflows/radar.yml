@@ -1,11 +1,11 @@
 name: radar
 
-# Triggered every 5 minutes by cron-job.org (workflow_dispatch, punctual);
-# GitHub's own schedule is a fallback, since it often starts runs late.
+# Triggered every 5 minutes by cron-job.org (workflow_dispatch, punctual).
+# GitHub's own schedule is only a fallback, since it often starts runs late.
 on:
   workflow_dispatch:
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '1-59/15 * * * *'
 
 concurrency:
   group: radar

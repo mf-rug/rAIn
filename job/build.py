@@ -41,15 +41,15 @@ OUT = Path(sys.argv[1] if len(sys.argv) > 1 else "out")
 
 
 def api(path):
-    for attempt in range(10):
+    for attempt in range(4):
         req = urllib.request.Request(f"{API}/{path}", headers={"Authorization": KEY})
         try:
             with urllib.request.urlopen(req, timeout=30) as r:
                 return json.load(r)
         except urllib.error.HTTPError as e:
-            if e.code != 429 or attempt == 9:
+            if e.code != 429 or attempt == 3:
                 raise
-            time.sleep(15)  # shared anonymous quota; a registered key avoids this
+            time.sleep(15)
 
 
 def download(dataset, name):
@@ -114,12 +114,17 @@ def main():
         old = json.loads((OUT / "index.json").read_text())
 
     # Newest observed frame; KNMI publishes ~2 min after the nominal time. If
-    # this run fired before the next one landed, wait for it (up to 2 min).
+    # the next frame is due but not out yet, wait for it (up to 2 min). If it
+    # isn't due yet (e.g. a duplicate trigger right after a run), stop here.
     t0 = stamp(latest(OBS))
-    deadline = time.time() + 120
-    while old.get("t0") == iso(t0) and time.time() < deadline:
-        time.sleep(20)
-        t0 = stamp(latest(OBS))
+    if old.get("t0") == iso(t0):
+        due = t0 + STEP + timedelta(minutes=1)
+        if datetime.now(timezone.utc) < due:
+            return finish(False, f"nothing new before {due:%H:%M}; t0 {iso(t0)}")
+        deadline = time.time() + 120
+        while old.get("t0") == iso(t0) and time.time() < deadline:
+            time.sleep(20)
+            t0 = stamp(latest(OBS))
     obs = []
     for k in range(PAST, -1, -1):
         t = t0 - k * STEP
@@ -152,12 +157,8 @@ def main():
         print("forecast run", iso(ref))
 
     changed = old.get("t0") != iso(t0) or old.get("ref") != iso(ref) or len(obs) != len(old.get("obs", []))
-    if os.environ.get("GITHUB_OUTPUT"):
-        with open(os.environ["GITHUB_OUTPUT"], "a") as gh:
-            gh.write(f"changed={'true' if changed else 'false'}\n")
     if not changed:
-        print("nothing new; t0", iso(t0), "ref", iso(ref))
-        return
+        return finish(False, f"nothing new; t0 {iso(t0)} ref {iso(ref)}")
 
     index = {"generated": iso(datetime.now(timezone.utc)), "t0": iso(t0), "ref": iso(ref), "obs": obs, "fc": fc}
     (OUT / "index.json").write_text(json.dumps(index, separators=(",", ":")))
@@ -166,8 +167,22 @@ def main():
     for p in OUT.glob("*.png"):
         if p.name not in keep:
             p.unlink()
-    print("t0", index["t0"], "ref", index["ref"], "frames", len(obs) + len(fc))
+    finish(True, f"t0 {index['t0']} ref {index['ref']} frames {len(obs) + len(fc)}")
+
+
+def finish(changed, msg):
+    print(msg)
+    if os.environ.get("GITHUB_OUTPUT"):
+        with open(os.environ["GITHUB_OUTPUT"], "a") as gh:
+            gh.write(f"changed={'true' if changed else 'false'}\n")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as e:
+        # KNMI rate limit or outage: skip this round rather than fail (and
+        # email); the next run, 5 minutes later, catches up. Bugs still fail.
+        if isinstance(e, urllib.error.HTTPError) and e.code not in (429, 500, 502, 503, 504):
+            raise
+        finish(False, f"KNMI unavailable ({e}); skipping this round")
