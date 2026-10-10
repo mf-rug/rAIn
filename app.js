@@ -618,7 +618,7 @@ function updateLoading() {
     return;
   }
   $('loading').hidden = false;
-  const slow = Date.now() - loading.started > 12e3 ? ' · KNMI is slow' : '';
+  const slow = state.src === 'wms' && Date.now() - loading.started > 12e3 ? ' · KNMI is slow' : '';
   $('loading-text').textContent = loading.error
     || (fr.length ? `Loading radar ${done}/${fr.length}${slow}` : 'Connecting to KNMI…');
   $('loading-bar').style.width = fr.length ? `${done / fr.length * 100}%` : '0%';
@@ -896,11 +896,14 @@ function drawGraph(series) {
 
   el('line', { x1: nowX, x2: nowX, y1: 2, y2: base, class: 'now' }, graph);
   el('text', { x: nowX, y: h - 4, 'text-anchor': 'middle', class: 'tick now-label' }, graph).textContent = 'now';
+  // Labels every 15 minutes, thinned to every 30 where they'd touch (narrow screens).
+  const gap = 27;
+  const every = slot * 3 >= gap ? 15 : 30;
   state.frames.forEach((f, i) => {
-    if (Math.abs(i - state.nowIdx) < 3 || i < 2 || i > n - 2) return;
-    if (new Date(f.t).getMinutes() % 15 !== 0) return;
-    const anchor = 'middle';
-    el('text', { x: cx(i), y: h - 4, 'text-anchor': anchor, class: 'tick' }, graph).textContent = hhmm(f.t);
+    const x = cx(i);
+    if (Math.abs(x - nowX) < gap || x < gap / 2 || x > w - gap / 2) return;
+    if (new Date(f.t).getMinutes() % every !== 0) return;
+    el('text', { x, y: h - 4, 'text-anchor': 'middle', class: 'tick' }, graph).textContent = hhmm(f.t);
   });
 
   if (Math.abs(state.pos - state.nowIdx) > 0.01 && state.frames.length) {

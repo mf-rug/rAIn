@@ -100,7 +100,7 @@ html, body {
 
 #graph .grid { stroke: var(--line); stroke-width: 1; }
 #graph .band { fill: var(--muted); font: 500 10px var(--narrow); }
-#graph .tick { fill: var(--muted); font: 500 11px var(--narrow); font-variant-numeric: tabular-nums; }
+#graph .tick { fill: var(--muted); font: 500 10.5px var(--narrow); font-variant-numeric: tabular-nums; }
 #graph .tick.now-label { fill: var(--now-ink); font-weight: 500; }
 #graph .now { stroke: var(--now); stroke-width: 3; }
 #graph .cursor { stroke: var(--ink); stroke-width: 1.5; }
