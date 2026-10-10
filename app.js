@@ -559,8 +559,37 @@ async function loadObserved() {
   }
 }
 
+// ---------- loading indicator ----------
+
+const loading = { started: 0, timer: null, error: '' };
+
+function updateLoading() {
+  const fr = state.frames;
+  const done = fr.filter((f) => f.bytes).length;
+  if (fr.length && done === fr.length) {
+    $('loading').hidden = true;
+    clearInterval(loading.timer);
+    loading.timer = null;
+    return;
+  }
+  $('loading').hidden = false;
+  const slow = Date.now() - loading.started > 12e3 ? ' · KNMI is slow' : '';
+  $('loading-text').textContent = loading.error
+    || (fr.length ? `Loading radar ${done}/${fr.length}${slow}` : 'Connecting to KNMI…');
+  $('loading-bar').style.width = fr.length ? `${done / fr.length * 100}%` : '0%';
+}
+
+function startLoading() {
+  loading.started = Date.now();
+  loading.error = '';
+  clearInterval(loading.timer);
+  loading.timer = setInterval(updateLoading, 1000);
+  updateLoading();
+}
+
 async function refresh() {
   state.lastCheck = Date.now();
+  loading.error = '';
   let obs, fc;
   try {
     if (!state.lut) state.lut = await loadLegend();
@@ -568,7 +597,8 @@ async function refresh() {
   } catch (e) {
     return failed(e);
   }
-  if (obs.time === state.t0 && fc.ref === state.ref) return;
+  // Nothing new and nothing missing: done. (Missing frames from a failed load are retried.)
+  if (obs.time === state.t0 && fc.ref === state.ref && state.frames.every((f) => f.bytes)) return;
 
   const t0 = obs.time, ref = fc.ref ?? t0;
   const wanted = [];
@@ -603,11 +633,13 @@ async function refresh() {
   const idx = next.map((_, i) => i);
   const order = [state.nowIdx, ...idx.filter((i) => i > state.nowIdx), ...idx.filter((i) => i < state.nowIdx).reverse()]
     .map((i) => next[i]).filter((f) => !f.bytes);
+  if (order.length && !loading.timer) startLoading();
   let error = null;
   const worker = async () => {
     while (order.length) {
       const f = order.shift();
       try { await loadFrame(f); } catch (e) { error = e; }
+      updateLoading();
     }
   };
   await Promise.all(Array.from({ length: CONCURRENCY }, worker));
@@ -618,6 +650,8 @@ async function refresh() {
 function failed(e) {
   console.warn(e);
   state.lastCheck = Date.now() - CHECK_EVERY + 60e3; // retry in a minute
+  loading.error = 'KNMI isn’t responding · retrying in a minute';
+  updateLoading();
   showStatus(e instanceof RateLimited
     ? 'KNMI’s shared radar service is busy right now. Trying again in a minute.'
     : 'KNMI’s radar service didn’t respond. Trying again in a minute.');
@@ -721,7 +755,8 @@ function drawGraph(series) {
     const x = i * slot + (slot - bw) / 2;
     const cls = i < state.nowIdx ? 'past' : '';
     if (v === null) {
-      el('rect', { x, y: base - 3, width: bw, height: 3, class: 'pending' }, graph);
+      // Negative delay keeps the pulse in phase across redraws.
+      el('rect', { x, y: base - 3, width: bw, height: 3, class: 'pending', style: `animation-delay:-${performance.now() % 1400}ms` }, graph);
     } else if (v < WET) {
       el('rect', { x, y: base - 2, width: bw, height: 2, class: `dry ${cls}` }, graph);
     } else {
@@ -840,5 +875,6 @@ addEventListener('resize', render);
 // ---------- start ----------
 
 if (!gpu.ok) showStatus('This browser can’t draw the radar map (WebGL is unavailable).');
+startLoading();
 locate();
 refresh();

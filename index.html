@@ -41,6 +41,11 @@
 
     <section class="mapwrap" aria-label="Radar map">
       <div id="map"></div>
+      <div id="loading" class="loading" role="status">
+        <span class="spinner" aria-hidden="true"></span>
+        <span id="loading-text">Connecting to KNMI…</span>
+        <span class="loading-bar" aria-hidden="true"><i id="loading-bar"></i></span>
+      </div>
       <button id="locate" class="locate" type="button" hidden>Use my location</button>
     </section>
 
