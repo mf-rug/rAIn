@@ -20,7 +20,10 @@ const PAST = 12;           // observed frames before "now" (1 hour)
 const AHEAD = 24;          // forecast frames (2 hours)
 const WET = 0.15;          // mm/h; below this counts as dry
 const CONCURRENCY = 4;
-const CHECK_EVERY = 4.5 * 60e3;
+// KNMI publishes a frame ~4 minutes after its nominal time, so nothing new can
+// exist before (latest frame + 5 min + lag). Until then reloads skip the check.
+const PUBLISH_LAG = 4.5 * 60e3;
+const POLL_EVERY = 30e3;   // once new data is due, check this often until it lands
 const PLAY_MS = 450;       // playback time per 5-minute step
 const FALLBACK = { lat: 52.101, lng: 5.177, name: 'De Bilt' };
 
@@ -43,7 +46,8 @@ const state = {
   nowIdx: PAST,
   pos: PAST,            // continuous position on the timeline, in frames
   t0: null, ref: null,
-  lastCheck: 0,
+  nextCheck: 0,
+  refreshing: false,
   playing: false,
   userScrubbed: false,
   lut: null,
@@ -123,14 +127,40 @@ async function observedSeries(pt, from, to) {
   return out;
 }
 
-async function loadImage(url) {
-  const blob = await (await get(url)).blob();
-  return createImageBitmap(blob);
+// ---------- persistent cache ----------
+// A frame URL names a fixed time (and forecast run), so its image never
+// changes: keep it in the Cache API until it drops off the timeline. Browsers'
+// HTTP caches (iOS especially) evict far more eagerly than this.
+
+const CACHE = 'rain-frames-v1';
+const openCache = () => ('caches' in self ? caches.open(CACHE).catch(() => null) : Promise.resolve(null));
+
+async function cachedImage(url) {
+  const cache = await openCache();
+  const hit = cache && await cache.match(url).catch(() => null);
+  if (hit) return createImageBitmap(await hit.blob());
+  const res = await get(url);
+  if (cache) cache.put(url, res.clone()).catch(() => {});
+  return createImageBitmap(await res.blob());
 }
+
+async function pruneCache(keep) {
+  const cache = await openCache();
+  if (!cache) return;
+  for (const req of await cache.keys()) {
+    if (!keep.has(req.url) && req.url.includes('REQUEST=GetMap')) cache.delete(req);
+  }
+}
+
+const store = {
+  get(k) { try { return JSON.parse(localStorage.getItem(`rain.${k}`)); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem(`rain.${k}`, JSON.stringify(v)); } catch { /* private mode */ } },
+};
+const dueAfter = (t0, ref) => Math.max(t0, ref ?? t0) + STEP + PUBLISH_LAG;
 
 // Legend bar: 0.1 mm/h at y=363, 40 mm/h at y=20, logarithmic.
 async function loadLegend() {
-  const img = await loadImage(`${WMS}?DATASET=${FC.dataset}&SERVICE=WMS&VERSION=1.3.0&REQUEST=GetLegendGraphic&LAYER=${FC.layer}&STYLE=${STYLE}&FORMAT=image/png`);
+  const img = await cachedImage(`${WMS}?DATASET=${FC.dataset}&SERVICE=WMS&VERSION=1.3.0&REQUEST=GetLegendGraphic&LAYER=${FC.layer}&STYLE=${STYLE}&FORMAT=image/png`);
   const ctx = new OffscreenCanvas(img.width, img.height).getContext('2d');
   ctx.drawImage(img, 0, 0);
   const col = ctx.getImageData(10, 0, 1, img.height).data;
@@ -166,7 +196,7 @@ function frameUrl(f) {
 
 // Fetch one frame and decode it to the byte encoding.
 async function loadFrame(f) {
-  const img = await loadImage(frameUrl(f));
+  const img = await cachedImage(frameUrl(f));
   const ctx = new OffscreenCanvas(W, H).getContext('2d', { willReadFrequently: true });
   ctx.drawImage(img, 0, 0, W, H);
   const d = ctx.getImageData(0, 0, W, H).data;
@@ -551,8 +581,13 @@ const hhmm = (t) => new Date(t).toLocaleTimeString('nl-NL', { hour: '2-digit', m
 async function loadObserved() {
   const pt = state.point;
   if (!pt || !state.t0) return;
+  // Same spot (to ~100 m) and same latest frame: the stored series is still exact.
+  const key = `${pt.lat.toFixed(3)},${pt.lng.toFixed(3)}|${state.t0}`;
+  const kept = store.get('observed');
+  if (kept?.key === key) { state.observed = new Map(kept.series); render(); return; }
   try {
     const series = await observedSeries(pt, state.t0 - PAST * STEP, state.t0);
+    store.set('observed', { key, series: [...series] });
     if (state.point === pt) { state.observed = series; render(); }
   } catch (e) {
     console.warn('observed series failed', e);
@@ -588,19 +623,33 @@ function startLoading() {
 }
 
 async function refresh() {
-  state.lastCheck = Date.now();
+  if (state.refreshing) return;
+  state.refreshing = true;
+  try { await update(); } finally { state.refreshing = false; }
+}
+
+async function update() {
   loading.error = '';
-  let obs, fc;
+  let t0, ref;
+  const known = store.get('latest');
   try {
     if (!state.lut) state.lut = await loadLegend();
-    [obs, fc] = await Promise.all([latestTimes(OBS), latestTimes(FC)]);
+    if (!state.t0 && known && Date.now() < dueAfter(known.t0, known.ref)) {
+      // Fresh page, but nothing newer can have been published yet: reuse.
+      ({ t0, ref } = known);
+    } else {
+      const [obs, fc] = await Promise.all([latestTimes(OBS), latestTimes(FC)]);
+      t0 = obs.time; ref = fc.ref ?? t0;
+    }
   } catch (e) {
     return failed(e);
   }
+  store.set('latest', { t0, ref });
+  const due = dueAfter(t0, ref);
+  state.nextCheck = Date.now() < due ? due : Date.now() + POLL_EVERY;
   // Nothing new and nothing missing: done. (Missing frames from a failed load are retried.)
-  if (obs.time === state.t0 && fc.ref === state.ref && state.frames.every((f) => f.bytes)) return;
+  if (t0 === state.t0 && ref === state.ref && state.frames.every((f) => f.bytes)) return;
 
-  const t0 = obs.time, ref = fc.ref ?? t0;
   const wanted = [];
   for (let k = PAST; k >= 1; k--) wanted.push({ kind: 'obs', t: t0 - k * STEP });
   wanted.push({ kind: 'obs', t: t0 });
@@ -628,6 +677,7 @@ async function refresh() {
   loadObserved();
   computeFlows();
   requestDraw();
+  pruneCache(new Set(next.map(frameUrl)));
 
   // Now first, then the forecast in order, then the past.
   const idx = next.map((_, i) => i);
@@ -649,7 +699,7 @@ async function refresh() {
 
 function failed(e) {
   console.warn(e);
-  state.lastCheck = Date.now() - CHECK_EVERY + 60e3; // retry in a minute
+  state.nextCheck = Date.now() + 60e3; // retry in a minute
   loading.error = 'KNMI isn’t responding · retrying in a minute';
   updateLoading();
   showStatus(e instanceof RateLimited
@@ -657,12 +707,11 @@ function failed(e) {
     : 'KNMI’s radar service didn’t respond. Trying again in a minute.');
 }
 
-setInterval(() => {
-  if (document.visibilityState === 'visible' && Date.now() - state.lastCheck > CHECK_EVERY) refresh();
-}, 15e3);
-document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && Date.now() - state.lastCheck > CHECK_EVERY) refresh();
-});
+const checkIfDue = () => {
+  if (document.visibilityState === 'visible' && Date.now() >= state.nextCheck) refresh();
+};
+setInterval(checkIfDue, 10e3);
+document.addEventListener('visibilitychange', checkIfDue);
 
 // ---------- timeline & playback ----------
 
