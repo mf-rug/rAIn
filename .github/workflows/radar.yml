@@ -2,8 +2,11 @@ name: radar
 
 # Triggered every 5 minutes by cron-job.org (workflow_dispatch, punctual).
 # GitHub's own schedule is only a fallback, since it often starts runs late.
+# Pushes to main redeploy the site with the app changes.
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
   schedule:
     - cron: '1-59/15 * * * *'
 
@@ -13,14 +16,21 @@ concurrency:
 
 permissions:
   contents: write
+  pages: write
+  id-token: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 8
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
 
+      # The data branch is the job's storage between runs: the frames published
+      # last time, so only new ones need fetching.
       - name: Fetch previous output
         run: |
           mkdir -p out
@@ -43,9 +53,8 @@ jobs:
         env:
           KNMI_API_KEY: ${{ secrets.KNMI_API_KEY }}
 
-      # The data branch holds a single commit, replaced each time, so the repo
-      # doesn't grow. The app reads it via raw.githubusercontent.com.
-      - name: Publish
+      # A single commit, replaced each time, so the repo doesn't grow.
+      - name: Store frames
         if: steps.build.outputs.changed == 'true'
         working-directory: out
         run: |
@@ -56,3 +65,23 @@ jobs:
           git push -qf "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" data
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # The site is the app plus the frames under data/. A Pages deployment
+      # purges the Pages CDN, so the app always sees the newest index.
+      - name: Assemble site
+        if: steps.build.outputs.changed == 'true' || github.event_name == 'push'
+        run: |
+          mkdir site
+          git archive HEAD | tar -x -C site
+          rm -rf site/job site/.github site/.gitignore
+          mkdir site/data
+          cp out/index.json out/*.png site/data/ 2>/dev/null || true
+
+      - uses: actions/upload-pages-artifact@v3
+        if: steps.build.outputs.changed == 'true' || github.event_name == 'push'
+        with:
+          path: site
+
+      - id: deploy
+        if: steps.build.outputs.changed == 'true' || github.event_name == 'push'
+        uses: actions/deploy-pages@v4

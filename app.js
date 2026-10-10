@@ -5,9 +5,14 @@
 // the rendered frames: the smooth style is a continuous log colour ramp
 // (0.1–40 mm/h) that inverts cleanly.
 const WMS = 'https://anonymous.api.dataplatform.knmi.nl/wms/adaguc-server';
-// Frames prepared every 5 minutes by job/build.py (GitHub Actions), one small
-// greyscale PNG each. Used whenever fresh; KNMI's WMS is the fallback.
-const DATA = 'https://raw.githubusercontent.com/mf-rug/rAIn/data/';
+// Frames prepared every 5 minutes by job/build.py (GitHub Actions) and deployed
+// with the site under data/, one small greyscale PNG each. Used whenever fresh;
+// KNMI's WMS is the fallback. (Not raw.githubusercontent.com: its CDN serves a
+// stale index for minutes after each update.)
+// Local development (localhost) reads the live site's data.
+const DATA = /^(localhost|127\.0\.0\.1)$/.test(location.hostname)
+  ? 'https://mf-rug.github.io/rAIn/data/'
+  : new URL('data/', location.href).href;
 const DATA_STALE = 20 * 60e3;
 const STYLE = 'precip-smooth-white-to-purple/bilinear';
 const OBS = { dataset: 'radar_reflectivity_composites', layer: 'precipitation' };
