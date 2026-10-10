@@ -50,8 +50,8 @@ const STOPS = [
 
 const $ = (id) => document.getElementById(id);
 
-// ?demo: fake rain at the point and fake reliability (good for ~50 minutes,
-// then dropping off), to preview how the forecast display looks.
+// ?demo: fake showery rain at the point and fake reliability (good for ~50
+// minutes, then dropping off), to preview how the forecast display looks.
 const DEMO = new URLSearchParams(location.search).has('demo') ? {
   skill: (() => {
     const fss = Array.from({ length: 24 }, (_, k) => (k < 6 ? 97 - 3 * k : Math.max(8, 80 - (k - 5) * 5)));
@@ -59,7 +59,9 @@ const DEMO = new URLSearchParams(location.search).has('demo') ? {
   })(),
   rain(m) { // minutes from now → mm/h
     const bump = (c, w, h) => h * Math.exp(-(((m - c) / w) ** 2));
-    return bump(-40, 12, 1.2) + bump(35, 14, 3.5) + bump(100, 10, 0.8);
+    // Showery: short bursts of varying strength every 15–25 minutes.
+    return [[-50, 0.8], [-28, 1.6], [-8, 0.6], [12, 1.4], [30, 2.8], [47, 0.9], [66, 3.2], [84, 1.3], [103, 2.2], [120, 0.9]]
+      .reduce((sum, [c, h]) => sum + bump(c, 4.5, h), 0);
   },
 } : null;
 const state = {
