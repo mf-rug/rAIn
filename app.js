@@ -783,15 +783,51 @@ function render() {
   drawReadout(series);
 }
 
+// Monotone cubic spline (Fritsch–Carlson) through [x, y] points: smooth, but
+// never overshoots, so dry stretches stay flat on the baseline.
+function monotonePath(pts) {
+  const n = pts.length;
+  if (n < 2) return n ? `M${pts[0][0]},${pts[0][1]}` : '';
+  const dx = [], m = [], t = new Array(n);
+  for (let i = 0; i < n - 1; i++) {
+    dx[i] = pts[i + 1][0] - pts[i][0];
+    m[i] = (pts[i + 1][1] - pts[i][1]) / dx[i];
+  }
+  t[0] = m[0]; t[n - 1] = m[n - 2];
+  for (let i = 1; i < n - 1; i++) t[i] = m[i - 1] * m[i] <= 0 ? 0 : (m[i - 1] + m[i]) / 2;
+  for (let i = 0; i < n - 1; i++) {
+    if (m[i] === 0) { t[i] = t[i + 1] = 0; continue; }
+    const a = t[i] / m[i], b = t[i + 1] / m[i], s = a * a + b * b;
+    if (s > 9) { const k = 3 / Math.sqrt(s); t[i] = k * a * m[i]; t[i + 1] = k * b * m[i]; }
+  }
+  let d = `M${pts[0][0]},${pts[0][1]}`;
+  for (let i = 0; i < n - 1; i++) {
+    const [x0, y0] = pts[i], [x1, y1] = pts[i + 1], h = dx[i] / 3;
+    d += `C${x0 + h},${y0 + t[i] * h},${x1 - h},${y1 - t[i + 1] * h},${x1},${y1}`;
+  }
+  return d;
+}
+
 function drawGraph(series) {
   const w = graph.clientWidth || 360, h = graph.clientHeight || 132;
   const top = 14, base = h - 22, plot = base - top;
   graph.setAttribute('viewBox', `0 0 ${w} ${h}`);
   graph.replaceChildren();
   const n = Math.max(series.length, PAST + 1 + AHEAD);
-  const slot = w / n, bw = Math.max(2, slot * 0.7);
-  const yOf = (v) => base - Math.max(3, Math.min(1, Math.log10(v / 0.1) / Math.log10(200)) * plot);
+  const slot = w / n;
+  const yOf = (v) => (v < 0.1 ? base : base - Math.min(1, Math.log10(v / 0.1) / Math.log10(200)) * plot);
   const cx = (i) => i * slot + slot / 2;
+  const nowX = cx(state.nowIdx);
+
+  // Fill colour follows height, and height follows intensity, so a vertical
+  // gradient through the rain palette colours the curve by intensity.
+  const defs = el('defs', {}, graph);
+  const grad = el('linearGradient', { id: 'rainfill', gradientUnits: 'userSpaceOnUse', x1: 0, y1: base, x2: 0, y2: top }, defs);
+  for (const v of [0.1, 0.3, 0.6, 1, 2, 4, 8, 20]) {
+    el('stop', { offset: (base - yOf(v)) / plot, 'stop-color': cssColor(v) }, grad);
+  }
+  el('rect', { x: 0, y: 0, width: nowX, height: h }, el('clipPath', { id: 'clip-past' }, defs));
+  el('rect', { x: nowX, y: 0, width: w - nowX, height: h }, el('clipPath', { id: 'clip-ahead' }, defs));
 
   for (const [v, label] of [[1, 'moderate'], [5, 'heavy']]) {
     const y = yOf(v);
@@ -800,26 +836,37 @@ function drawGraph(series) {
   }
   el('line', { x1: 0, x2: w, y1: base, y2: base, class: 'grid' }, graph);
 
+  // Curve per run of loaded values; frames still loading pulse on the baseline.
+  let run = [];
+  const flush = () => {
+    if (run.length > 1) {
+      const line = monotonePath(run);
+      const area = `${line}L${run[run.length - 1][0]},${base}L${run[0][0]},${base}Z`;
+      for (const [clip, cls] of [['clip-past', 'past'], ['clip-ahead', '']]) {
+        const g = el('g', { 'clip-path': `url(#${clip})`, class: cls }, graph);
+        el('path', { d: area, class: 'area' }, g);
+        el('path', { d: line, class: 'curve' }, g);
+      }
+    }
+    run = [];
+  };
   series.forEach((v, i) => {
-    const x = i * slot + (slot - bw) / 2;
-    const cls = i < state.nowIdx ? 'past' : '';
     if (v === null) {
+      flush();
       // Negative delay keeps the pulse in phase across redraws.
-      el('rect', { x, y: base - 3, width: bw, height: 3, class: 'pending', style: `animation-delay:-${performance.now() % 1400}ms` }, graph);
-    } else if (v < WET) {
-      el('rect', { x, y: base - 2, width: bw, height: 2, class: `dry ${cls}` }, graph);
+      el('line', { x1: cx(i) - slot / 2, x2: cx(i) + slot / 2, y1: base - 1.5, y2: base - 1.5, class: 'pending', style: `animation-delay:-${performance.now() % 1400}ms` }, graph);
     } else {
-      const y = yOf(v);
-      el('rect', { x, y, width: bw, height: base - y, rx: Math.min(2, bw / 3), fill: cssColor(v), class: cls }, graph);
+      run.push([cx(i), yOf(v)]);
     }
   });
+  flush();
 
-  el('line', { x1: cx(state.nowIdx), x2: cx(state.nowIdx), y1: 2, y2: base, class: 'now' }, graph);
-  el('text', { x: cx(state.nowIdx), y: h - 4, 'text-anchor': 'middle', class: 'tick now-label' }, graph).textContent = 'now';
+  el('line', { x1: nowX, x2: nowX, y1: 2, y2: base, class: 'now' }, graph);
+  el('text', { x: nowX, y: h - 4, 'text-anchor': 'middle', class: 'tick now-label' }, graph).textContent = 'now';
   state.frames.forEach((f, i) => {
-    if (Math.abs(i - state.nowIdx) < 4) return;
-    if (new Date(f.t).getMinutes() % 30 !== 0) return;
-    const anchor = i > n - 3 ? 'end' : i < 2 ? 'start' : 'middle';
+    if (Math.abs(i - state.nowIdx) < 3 || i < 2 || i > n - 2) return;
+    if (new Date(f.t).getMinutes() % 15 !== 0) return;
+    const anchor = 'middle';
     el('text', { x: cx(i), y: h - 4, 'text-anchor': anchor, class: 'tick' }, graph).textContent = hhmm(f.t);
   });
 
@@ -827,7 +874,7 @@ function drawGraph(series) {
     const x = state.pos * slot + slot / 2;
     el('line', { x1: x, x2: x, y1: 2, y2: base, class: 'cursor' }, graph);
     const v = valueAt(series, state.pos);
-    el('circle', { cx: x, cy: v >= WET ? yOf(v) : base, r: 3.5, class: 'cursor-dot' }, graph);
+    el('circle', { cx: x, cy: v == null ? base : yOf(v), r: 3.5, class: 'cursor-dot' }, graph);
   }
 }
 
