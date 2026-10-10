@@ -540,6 +540,7 @@ function setPoint(pt, recenter) {
   $('place').textContent = pt.label;
   state.observed = new Map();
   loadObserved();
+  loadBuienradar(true);
   highlightCountry(pt);
   render();
 }
@@ -601,6 +602,32 @@ async function loadObserved() {
     if (state.point === pt) { state.observed = series; render(); }
   } catch (e) {
     console.warn('observed series failed', e);
+  }
+}
+
+// ---------- Buienradar comparison ----------
+// Buienradar's own point forecast, drawn as a thin line over the KNMI curve.
+// Their feed terms: free use with credit and a link to buienradar.nl (footer).
+
+const BUIENRADAR = 'https://graphdata.buienradar.nl/2.0/forecast/geo/RainHistoryForecast';
+const br = { key: null, at: 0, series: new Map() };
+
+async function loadBuienradar(force) {
+  const pt = state.point;
+  if (!pt) return;
+  const key = `${pt.lat.toFixed(2)},${pt.lng.toFixed(2)}`;
+  if (!force && br.key === key && Date.now() - br.at < 4 * 60e3) return;
+  try {
+    const res = await fetch(`${BUIENRADAR}?lat=${pt.lat.toFixed(2)}&lon=${pt.lng.toFixed(2)}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const d = await res.json();
+    if (state.point !== pt) return;
+    br.key = key;
+    br.at = Date.now();
+    br.series = new Map(d.forecasts.map((f) => [Date.parse(`${f.utcdatetime}Z`), f.precipitation]));
+    render();
+  } catch (e) {
+    console.warn('Buienradar unavailable', e);
   }
 }
 
@@ -691,6 +718,7 @@ async function update() {
   // Nothing new and nothing missing: done. (Missing frames from a failed load are retried.)
   if (t0 === state.t0 && ref === state.ref && state.frames.every((f) => f.bytes)) return;
   state.src = plan.data ? 'data' : 'wms';
+  loadBuienradar(false);
 
   // Keep frames we already have (observed frames never change). Flows are
   // recomputed, since a frame's neighbour may have changed.
@@ -894,6 +922,18 @@ function drawGraph(series) {
   });
   flush();
 
+  // Buienradar's forecast for the same spot, for comparison.
+  const brPts = [];
+  state.frames.forEach((f, i) => {
+    const v = br.series.get(f.t);
+    if (v != null) brPts.push([cx(i), yOf(v)]);
+  });
+  if (brPts.length > 1) {
+    el('path', { d: monotonePath(brPts), class: 'br' }, graph);
+    el('line', { x1: 0, x2: 14, y1: 5, y2: 5, class: 'br' }, graph);
+    el('text', { x: 18, y: 8, class: 'band' }, graph).textContent = 'Buienradar';
+  }
+
   el('line', { x1: nowX, x2: nowX, y1: 2, y2: base, class: 'now' }, graph);
   el('text', { x: nowX, y: h - 4, 'text-anchor': 'middle', class: 'tick now-label' }, graph).textContent = 'now';
   // Labels every 15 minutes, thinned to every 30 where they'd touch (narrow screens).
@@ -924,7 +964,21 @@ function valueAt(series, pos) {
 }
 
 function drawVerdict(series) {
-  const ahead = series.slice(state.nowIdx);
+  let ahead = series.slice(state.nowIdx);
+  // KNMI unavailable: fall back to Buienradar's forecast for the verdict.
+  if (ahead.some((v) => v === null) && loading.error) {
+    const alt = state.frames.slice(state.nowIdx).map((f) => br.series.get(f.t) ?? null);
+    if (alt.length && alt.every((v) => v !== null)) {
+      ahead = alt;
+      verdictFor(ahead);
+      $('detail').textContent += ' (Buienradar forecast; KNMI data unavailable.)';
+      return;
+    }
+  }
+  verdictFor(ahead);
+}
+
+function verdictFor(ahead) {
   const t = (i) => `<span class="t">${hhmm(state.frames[state.nowIdx + i].t)}</span>`;
   if (!state.point || !ahead.length || ahead.some((v) => v === null)) {
     $('verdict').textContent = 'Reading the radar…';
@@ -975,7 +1029,9 @@ function drawReadout(series) {
   const kind = state.pos > state.nowIdx ? 'forecast' : 'radar';
   const when = atNow ? `now (${hhmm(tm)})` : `${hhmm(tm)} ${kind}`;
   const what = v === null ? 'loading…' : v < WET ? 'dry' : `${intensity(v)} rain, ${v.toFixed(1)}\u00a0mm/h`;
-  $('readout').textContent = `${when} · ${what}`;
+  const bv = br.series.get(fr[Math.round(state.pos)]?.t);
+  const other = bv == null ? '' : ` · Buienradar ${bv < WET ? 'dry' : `${bv.toFixed(1)}\u00a0mm/h`}`;
+  $('readout').textContent = `${when} · ${what}${other}`;
 }
 
 // Scrub the shared timeline by dragging across the graph; it moves continuously.
