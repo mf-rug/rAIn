@@ -1,0 +1,58 @@
+name: radar
+
+# Triggered every 5 minutes by cron-job.org (workflow_dispatch, punctual);
+# GitHub's own schedule is a fallback, since it often starts runs late.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/5 * * * *'
+
+concurrency:
+  group: radar
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch previous output
+        run: |
+          mkdir -p out
+          if git ls-remote --exit-code origin data >/dev/null; then
+            git fetch -q --depth=1 origin data
+            git --work-tree=out checkout origin/data -- .
+          fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: job/requirements.txt
+
+      - run: pip install -q -r job/requirements.txt
+
+      - name: Build frames
+        id: build
+        run: python job/build.py out
+        env:
+          KNMI_API_KEY: ${{ secrets.KNMI_API_KEY }}
+
+      # The data branch holds a single commit, replaced each time, so the repo
+      # doesn't grow. The app reads it via raw.githubusercontent.com.
+      - name: Publish
+        if: steps.build.outputs.changed == 'true'
+        working-directory: out
+        run: |
+          git init -q -b data
+          git add -A
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit -qm "radar $(jq -r .t0 index.json), forecast $(jq -r .ref index.json)"
+          git push -qf "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" data
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

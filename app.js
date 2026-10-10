@@ -5,24 +5,29 @@
 // the rendered frames: the smooth style is a continuous log colour ramp
 // (0.1–40 mm/h) that inverts cleanly.
 const WMS = 'https://anonymous.api.dataplatform.knmi.nl/wms/adaguc-server';
+// Frames prepared every 5 minutes by job/build.py (GitHub Actions), one small
+// greyscale PNG each. Used whenever fresh; KNMI's WMS is the fallback.
+const DATA = 'https://raw.githubusercontent.com/mf-rug/rAIn/data/';
+const DATA_STALE = 20 * 60e3;
 const STYLE = 'precip-smooth-white-to-purple/bilinear';
 const OBS = { dataset: 'radar_reflectivity_composites', layer: 'precipitation' };
 const FC = { dataset: 'radar_forecast', layer: 'precipitationfc' };
 
-// Full radar domain in Web Mercator, as advertised by the WMS. A pixel is 1.15
-// Mercator km, which at Dutch latitudes is ~0.7 km on the ground, so this
-// slightly oversamples the native 1 km radar grid.
+// Full radar domain in Web Mercator, as advertised by the WMS. A pixel is 1.73
+// Mercator km, which at Dutch latitudes is ~1.06 km on the ground: about the
+// native 1 km radar grid. Must match job/build.py.
 const X0 = 0, Y0 = 6257115.396264, X1 = 1208534.924976, Y1 = 7553162.131589;
-const W = 1050, H = 1126;
+const W = 700, H = 751;
 
 const STEP = 5 * 60e3;
 const PAST = 12;           // observed frames before "now" (1 hour)
 const AHEAD = 24;          // forecast frames (2 hours)
 const WET = 0.15;          // mm/h; below this counts as dry
 const CONCURRENCY = 4;
-// KNMI publishes a frame ~4 minutes after its nominal time, so nothing new can
-// exist before (latest frame + 5 min + lag). Until then reloads skip the check.
-const PUBLISH_LAG = 4.5 * 60e3;
+// New frames appear ~4–5 minutes after their nominal time (KNMI, or the job), so
+// nothing new can exist before (latest frame + 5 min + lag). Until then reloads
+// skip the check.
+const PUBLISH_LAG = 5 * 60e3;
 const POLL_EVERY = 30e3;   // once new data is due, check this often until it lands
 const PLAY_MS = 450;       // playback time per 5-minute step
 const FALLBACK = { lat: 52.101, lng: 5.177, name: 'De Bilt' };
@@ -40,6 +45,7 @@ const STOPS = [
 
 const $ = (id) => document.getElementById(id);
 const state = {
+  src: null,            // 'data' (job output) or 'wms'
   point: null,          // {lat, lng, label}
   frames: [],           // ordered by time
   observed: new Map(),  // time → mm/h at the point, from GetFeatureInfo
@@ -135,20 +141,20 @@ async function observedSeries(pt, from, to) {
 const CACHE = 'rain-frames-v1';
 const openCache = () => ('caches' in self ? caches.open(CACHE).catch(() => null) : Promise.resolve(null));
 
-async function cachedImage(url) {
+async function cachedImage(url, opts) {
   const cache = await openCache();
   const hit = cache && await cache.match(url).catch(() => null);
-  if (hit) return createImageBitmap(await hit.blob());
+  if (hit) return createImageBitmap(await hit.blob(), opts);
   const res = await get(url);
   if (cache) cache.put(url, res.clone()).catch(() => {});
-  return createImageBitmap(await res.blob());
+  return createImageBitmap(await res.blob(), opts);
 }
 
 async function pruneCache(keep) {
   const cache = await openCache();
   if (!cache) return;
   for (const req of await cache.keys()) {
-    if (!keep.has(req.url) && req.url.includes('REQUEST=GetMap')) cache.delete(req);
+    if (!keep.has(req.url) && !req.url.includes('GetLegendGraphic')) cache.delete(req);
   }
 }
 
@@ -186,23 +192,26 @@ function invert(lut, r, g, b) {
   return v;
 }
 
-function frameUrl(f) {
-  const src = f.kind === 'obs' ? OBS : FC;
+function wmsUrl(kind, t, ref) {
+  const src = kind === 'obs' ? OBS : FC;
   let u = `${WMS}?DATASET=${src.dataset}&SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap&LAYERS=${src.layer}&STYLES=${STYLE}` +
-    `&CRS=EPSG:3857&BBOX=${X0},${Y0},${X1},${Y1}&WIDTH=${W}&HEIGHT=${H}&FORMAT=image/png&TRANSPARENT=true&TIME=${iso(f.t)}`;
-  if (f.kind === 'fc') u += `&DIM_REFERENCE_TIME=${iso(f.ref)}`;
+    `&CRS=EPSG:3857&BBOX=${X0},${Y0},${X1},${Y1}&WIDTH=${W}&HEIGHT=${H}&FORMAT=image/png&TRANSPARENT=true&TIME=${iso(t)}`;
+  if (kind === 'fc') u += `&DIM_REFERENCE_TIME=${iso(ref)}`;
   return u;
 }
 
-// Fetch one frame and decode it to the byte encoding.
+// Fetch one frame and decode it to the byte encoding. The job's PNGs already
+// hold the bytes; WMS frames are read back through the legend colours.
 async function loadFrame(f) {
-  const img = await cachedImage(frameUrl(f));
+  const data = f.src === 'data';
+  const img = await cachedImage(f.url, data ? { colorSpaceConversion: 'none', premultiplyAlpha: 'none' } : undefined);
   const ctx = new OffscreenCanvas(W, H).getContext('2d', { willReadFrequently: true });
   ctx.drawImage(img, 0, 0, W, H);
   const d = ctx.getImageData(0, 0, W, H).data;
   const bytes = new Uint8Array(W * H);
   for (let i = 0, p = 0; i < bytes.length; i++, p += 4) {
-    if (d[p + 3] >= 64) bytes[i] = invert(state.lut, d[p], d[p + 1], d[p + 2]);
+    if (data) bytes[i] = d[p];
+    else if (d[p + 3] >= 64) bytes[i] = invert(state.lut, d[p], d[p + 1], d[p + 2]);
   }
   f.bytes = bytes;
   f.tex = gpu.frameTexture(bytes);
@@ -216,7 +225,7 @@ function pixelOf(pt) {
   return [Math.floor((x - X0) / (X1 - X0) * W), Math.floor((Y1 - y) / (Y1 - Y0) * H)];
 }
 
-// Forecast rain at a point: mean of the 3×3 pixels around it (~3.5 km box).
+// Rain at a point: mean of the 3×3 pixels around it (~3 km box).
 function sample(f, pt) {
   if (!f.bytes || !pt) return null;
   const [cx, cy] = pixelOf(pt);
@@ -236,8 +245,8 @@ function sample(f, pt) {
 
 const QW = W >> 2, QH = H >> 2;
 const GX = 14, GY = 15;    // flow grid
-const BLOCK = 16;          // half block size, quarter pixels (~45 km on the ground)
-const SEARCH = 4;          // max shift per 5 min, quarter pixels (~11 km, i.e. ~135 km/h)
+const BLOCK = 12;          // half block size, quarter pixels (~50 km on the ground)
+const SEARCH = 3;          // max shift per 5 min, quarter pixels (~13 km, i.e. ~150 km/h)
 
 function quarter(bytes) {
   const q = new Uint8Array(QW * QH);
@@ -580,7 +589,8 @@ const hhmm = (t) => new Date(t).toLocaleTimeString('nl-NL', { hour: '2-digit', m
 
 async function loadObserved() {
   const pt = state.point;
-  if (!pt || !state.t0) return;
+  // The job's frames carry exact values; only WMS frames need the point query.
+  if (!pt || !state.t0 || state.src !== 'wms') return;
   // Same spot (to ~100 m) and same latest frame: the stored series is still exact.
   const key = `${pt.lat.toFixed(3)},${pt.lng.toFixed(3)}|${state.t0}`;
   const kept = store.get('observed');
@@ -628,41 +638,64 @@ async function refresh() {
   try { await update(); } finally { state.refreshing = false; }
 }
 
+// Latest times and where to get each frame: the job's index when fresh,
+// otherwise KNMI's WMS.
+async function fetchPlan() {
+  try {
+    const res = await fetch(`${DATA}index.json?v=${Math.floor(Date.now() / 30e3)}`, { cache: 'no-store' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const idx = await res.json();
+    const t0 = Date.parse(idx.t0);
+    if (Date.now() - t0 < DATA_STALE) {
+      const entries = (list, kind) => list.map((e) => [`${kind}|${Date.parse(e.t)}`, DATA + e.file]);
+      return { t0, ref: Date.parse(idx.ref), data: [...entries(idx.obs, 'obs'), ...entries(idx.fc, 'fc')] };
+    }
+    console.warn('job output is stale; using KNMI directly');
+  } catch (e) {
+    console.warn('job output unavailable; using KNMI directly', e);
+  }
+  const [obs, fc] = await Promise.all([latestTimes(OBS), latestTimes(FC)]);
+  return { t0: obs.time, ref: fc.ref ?? obs.time, data: null };
+}
+
+// The timeline is a regular 5-minute grid; any frame the job lacks comes from the WMS.
+function planFrames({ t0, ref, data }) {
+  const lookup = new Map(data ?? []);
+  const spec = (kind, t, r) => {
+    const url = lookup.get(`${kind}|${t}`);
+    return url ? { kind, t, ref: r, src: 'data', url } : { kind, t, ref: r, src: 'wms', url: wmsUrl(kind, t, r) };
+  };
+  const frames = [];
+  for (let k = PAST; k >= 0; k--) frames.push(spec('obs', t0 - k * STEP, null));
+  // A forecast run can be newer than the latest observation; start right after it.
+  for (let t = t0 + STEP; t <= ref + AHEAD * STEP; t += STEP) frames.push(spec('fc', t, ref));
+  return frames;
+}
+
 async function update() {
   loading.error = '';
-  let t0, ref;
-  const known = store.get('latest');
+  let plan, wanted;
+  const known = store.get('plan');
   try {
-    if (!state.lut) state.lut = await loadLegend();
-    if (!state.t0 && known && Date.now() < dueAfter(known.t0, known.ref)) {
-      // Fresh page, but nothing newer can have been published yet: reuse.
-      ({ t0, ref } = known);
-    } else {
-      const [obs, fc] = await Promise.all([latestTimes(OBS), latestTimes(FC)]);
-      t0 = obs.time; ref = fc.ref ?? t0;
-    }
+    // Fresh page, but nothing newer can have been published yet: reuse.
+    plan = !state.t0 && known && Date.now() < dueAfter(known.t0, known.ref) ? known : await fetchPlan();
+    wanted = planFrames(plan);
+    if (!state.lut && wanted.some((f) => f.src === 'wms')) state.lut = await loadLegend();
   } catch (e) {
     return failed(e);
   }
-  store.set('latest', { t0, ref });
+  store.set('plan', plan);
+  const { t0, ref } = plan;
   const due = dueAfter(t0, ref);
   state.nextCheck = Date.now() < due ? due : Date.now() + POLL_EVERY;
   // Nothing new and nothing missing: done. (Missing frames from a failed load are retried.)
   if (t0 === state.t0 && ref === state.ref && state.frames.every((f) => f.bytes)) return;
-
-  const wanted = [];
-  for (let k = PAST; k >= 1; k--) wanted.push({ kind: 'obs', t: t0 - k * STEP });
-  wanted.push({ kind: 'obs', t: t0 });
-  for (let k = 1; k <= AHEAD; k++) {
-    const t = ref + k * STEP;
-    if (t > t0) wanted.push({ kind: 'fc', t, ref });
-  }
+  state.src = plan.data ? 'data' : 'wms';
 
   // Keep frames we already have (observed frames never change). Flows are
   // recomputed, since a frame's neighbour may have changed.
-  const key = (f) => `${f.kind}|${f.t}|${f.ref ?? ''}`;
-  const have = new Map(state.frames.map((f) => [key(f), f]));
-  const next = wanted.map((w) => have.get(key(w)) ?? { ...w });
+  const have = new Map(state.frames.map((f) => [f.url, f]));
+  const next = wanted.map((w) => have.get(w.url) ?? w);
   for (const f of state.frames) {
     gpu.drop(f.flowTex); f.flowTex = null;
     if (!next.includes(f)) gpu.drop(f.tex);
@@ -677,7 +710,7 @@ async function update() {
   loadObserved();
   computeFlows();
   requestDraw();
-  pruneCache(new Set(next.map(frameUrl)));
+  pruneCache(new Set(next.map((f) => f.url)));
 
   // Now first, then the forecast in order, then the past.
   const idx = next.map((_, i) => i);
