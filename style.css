@@ -122,6 +122,9 @@ html, body {
   overflow: visible;
 }
 
+/* Touches always land on the svg itself: its contents are redrawn on every
+   move, and iOS stops a touch whose target element is removed. */
+#graph * { pointer-events: none; }
 #graph .grid { stroke: var(--line); stroke-width: 1; }
 #graph .band { fill: var(--muted); font: 500 10px var(--narrow); }
 #graph .tick { fill: var(--muted); font: 500 10.5px var(--narrow); font-variant-numeric: tabular-nums; }
