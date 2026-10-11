@@ -30,7 +30,8 @@ from pyproj import Transformer
 from shapely.geometry import box
 from shapely.ops import unary_union
 
-URL = "https://opendata.dwd.de/weather/radar/composite/rv/composite_rv_LATEST.tar"
+BASE = "https://opendata.dwd.de/weather/radar/composite/rv/"
+URL = BASE + "composite_rv_LATEST.tar"   # DWD keeps ~48 h of runs as composite_rv_YYYYmmdd_HHMM.tar
 
 # Must match app.js / build.py.
 X0, Y0, X1, Y1 = 0, 6257115.396264, 1208534.924976, 7553162.131589
@@ -99,15 +100,22 @@ def _bytes(mmh, valid):
     return b
 
 
-def fetch():
-    """→ (run time, 25 mm/h grids on the app's grid for +0 … +120 min,
-          25 byte frames on the DWD-wide map grid, that grid's description)."""
-    with urllib.request.urlopen(URL, timeout=60) as r:
+def fetch_analysis(t):
+    """DWD's analysis (+0 step) at time t from its archive of runs:
+    → (mm/h grid on the app's grid, byte frame on the map grid)."""
+    _, grids, frames, _ = fetch(f"{BASE}composite_rv_{t:%Y%m%d_%H%M}.tar", steps=1)
+    return grids[0], frames[0]
+
+
+def fetch(url=URL, steps=25):
+    """→ (run time, mm/h grids on the app's grid for +0 … +120 min,
+          byte frames on the DWD-wide map grid, that grid's description)."""
+    with urllib.request.urlopen(url, timeout=60) as r:
         tar = tarfile.open(fileobj=io.BytesIO(r.read()))
     members = sorted((m for m in tar.getmembers() if m.name.endswith("-hd5")), key=lambda m: m.name)
     ref = datetime.strptime("".join(members[0].name.split("_")[2:4]), "%Y%m%d%H%M").replace(tzinfo=timezone.utc)
     grids, frames, meta = [], [], None
-    for m in members[:25]:
+    for m in members[:steps]:
         f = h5py.File(io.BytesIO(tar.extractfile(m).read()))
         what = f["dataset1/data1/what"].attrs
         proj = f["where"].attrs["projdef"]

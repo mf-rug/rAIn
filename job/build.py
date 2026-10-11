@@ -272,8 +272,26 @@ def main():
                 Image.fromarray(frame, "L").save(OUT / name, optimize=True)
             map_fc.append(name)
         old_map = (dwd_meta or {}).get("map") or {}
-        map_obs = sorted({e["t"]: e for e in old_map.get("obs", []) + [{"t": iso(dwd_ref), "file": map_obs_name}]
-                          if e["t"] >= iso(oldest) and (OUT / e["file"]).exists()}.values(), key=lambda e: e["t"])
+        map_obs = {e["t"]: e for e in old_map.get("obs", []) + [{"t": iso(dwd_ref), "file": map_obs_name}]
+                   if e["t"] >= iso(oldest) and (OUT / e["file"]).exists()}
+        win_obs = {e["t"]: e for e in dwd_obs}
+        # Fill gaps in the past hour (runs that found nothing new skipped DWD)
+        # from DWD's archive of runs, a few per run.
+        missing = [oldest + k * STEP for k in range(PAST + 1) if oldest + k * STEP < dwd_ref and iso(oldest + k * STEP) not in map_obs]
+        for t in missing[-3:]:
+            try:
+                g0, f0 = dwd.fetch_analysis(t)
+            except Exception as e:
+                print("dwd archive", iso(t), e)
+                continue
+            mname, wname = f"dwd-map-obs-{t:%Y%m%d%H%M}.png", f"dwd-obs-{t:%Y%m%d%H%M}.png"
+            Image.fromarray(f0, "L").save(OUT / mname, optimize=True)
+            Image.fromarray(dwd.encode(g0), "L").save(OUT / wname, optimize=True)
+            map_obs[iso(t)] = {"t": iso(t), "file": mname}
+            win_obs[iso(t)] = {"t": iso(t), "file": wname}
+            print("dwd filled", iso(t))
+        map_obs = sorted(map_obs.values(), key=lambda e: e["t"])
+        dwd_obs = sorted(win_obs.values(), key=lambda e: e["t"])
         dwd_meta = {"ref": iso(dwd_ref), "fc": fc_name, "obs": dwd_obs, **dwd.WINDOW,
                     "map": {**dwd_grid, "fc": map_fc, "obs": map_obs, "coverage": dwd.map_coverage(dwd_frames[0], dwd_grid)}}
         print("dwd run", iso(dwd_ref))
