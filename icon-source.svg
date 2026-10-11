@@ -1,0 +1,15 @@
+<!-- Source of icon-*.png (rendered in a browser with Bricolage Grotesque loaded; the letters are text). -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs><linearGradient id="g" gradientUnits="userSpaceOnUse" x1="0" y1="330" x2="0" y2="138">
+    <stop offset="0" stop-color="#8EC5DE"/><stop offset="0.45" stop-color="#2E6FBF"/><stop offset="0.75" stop-color="#1B3F8B"/><stop offset="1" stop-color="#5B2A86"/></linearGradient></defs>
+  <rect width="512" height="512" fill="#142026"/>
+  <text x="160" y="330" text-anchor="end" font-family="Bricolage Grotesque" font-weight="700" font-size="200" fill="#E3EBEE">r</text>
+  <path d="M168,330 C204.96,330 211.56,150 234.0,150 C256.44,150 263.04,330 300,330 Z" fill="url(#g)"/>
+  <path d="M310.5,330 C319.5,330 322.5,316 322.5,296 L325.5,142.5 Q325.5,138 330,138 Q334.5,138 334.5,142.5 L337.5,296 C337.5,316 340.5,330 349.5,330 Z" fill="url(#g)"/>
+  <text x="353.5" y="330" text-anchor="start" font-family="Bricolage Grotesque" font-weight="700" font-size="200" fill="#E3EBEE">n</text>
+  <g opacity="0.9">
+    <rect x="190" y="372" width="11" height="40" rx="5.5" fill="#2E6FBF" transform="rotate(15 195 392)"/>
+    <rect x="252" y="390" width="11" height="40" rx="5.5" fill="#FFC917" transform="rotate(15 257 410)"/>
+    <rect x="314" y="372" width="11" height="40" rx="5.5" fill="#2E6FBF" transform="rotate(15 319 392)"/>
+  </g>
+</svg>
