@@ -494,15 +494,41 @@ const CanvasOverlay = L.ImageOverlay.extend({
   },
 });
 
-// Zoom: quarter-level snapping (practically continuous; tiles are scaled in
-// between), a slower scroll wheel for trackpads, and room to zoom out to
-// Western Europe on a phone.
+// Zoom: continuous (tiles are scaled between whole levels), room to zoom out
+// to Western Europe on a phone. Trackpad pinches are handled below.
 const map = L.map('map', {
   zoomControl: false, attributionControl: false,
   minZoom: 4, maxZoom: 12,
-  zoomSnap: 0.25, zoomDelta: 0.5, wheelPxPerZoomLevel: 80,
+  zoomSnap: 0, zoomDelta: 0.5, wheelPxPerZoomLevel: 80,
 })
   .setView([FALLBACK.lat, FALLBACK.lng], 8);
+// Trackpad pinch in desktop browsers: zoom in proportion to the pinch, around
+// the cursor, immediately. Chrome/Firefox report pinches as wheel events with
+// ctrlKey; Safari as gesture events with a scale. Leaflet's wheel zoom is made
+// for mouse-wheel clicks (it batches, caps and rounds), which loses the speed.
+{
+  const el = map.getContainer();
+  el.addEventListener('wheel', (e) => {
+    if (!e.ctrlKey) return;   // plain scrolling and mouse wheels: Leaflet
+    e.preventDefault();
+    e.stopPropagation();
+    const step = e.deltaMode === 1 ? 0.05 : 0.012;   // lines vs pixels
+    map.setZoomAround(map.mouseEventToContainerPoint(e), map.getZoom() - e.deltaY * step, { animate: false });
+  }, { passive: false, capture: true });
+  // iPhones fire gesture events too, next to the touch events Leaflet handles:
+  // only use them on devices without a touchscreen (Macs).
+  if (navigator.maxTouchPoints === 0) {
+    let start = null;
+    el.addEventListener('gesturestart', (e) => { e.preventDefault(); start = map.getZoom(); });
+    el.addEventListener('gesturechange', (e) => {
+      if (start == null) return;
+      e.preventDefault();
+      map.setZoomAround(map.mouseEventToContainerPoint(e), start + Math.log2(e.scale), { animate: false });
+    });
+    el.addEventListener('gestureend', () => { start = null; });
+  }
+}
+
 map.createPane('labels');
 map.getPane('labels').style.zIndex = 450;
 map.getPane('labels').style.pointerEvents = 'none';
