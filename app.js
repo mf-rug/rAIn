@@ -1430,12 +1430,36 @@ function scrubTo(e) {
 }
 graph.setAttribute('tabindex', '0');
 graph.addEventListener('pointerdown', (e) => {
+  if (e.pointerType === 'touch') return;   // touch: handled below
   stop();
   state.userScrubbed = true;
   graph.setPointerCapture(e.pointerId);
   scrubTo(e);
 });
-graph.addEventListener('pointermove', (e) => { if (graph.hasPointerCapture(e.pointerId)) scrubTo(e); });
+graph.addEventListener('pointermove', (e) => {
+  if (e.pointerType !== 'touch' && graph.hasPointerCapture(e.pointerId)) scrubTo(e);
+});
+// Touch: raw touch events with iOS's own handling cancelled. Otherwise iOS
+// takes the gesture over (as a scroll/bounce) once the finger drifts
+// vertically, and the drag freezes; touch-action alone isn't honoured on svg.
+let touchId = null;
+graph.addEventListener('touchstart', (e) => {
+  const t = e.changedTouches[0];
+  touchId = t.identifier;
+  e.preventDefault();
+  stop();
+  state.userScrubbed = true;
+  scrubTo(t);
+}, { passive: false });
+graph.addEventListener('touchmove', (e) => {
+  const t = [...e.changedTouches].find((x) => x.identifier === touchId);
+  if (!t) return;
+  e.preventDefault();
+  scrubTo(t);
+}, { passive: false });
+const endTouch = (e) => { if ([...e.changedTouches].some((x) => x.identifier === touchId)) touchId = null; };
+graph.addEventListener('touchend', endTouch);
+graph.addEventListener('touchcancel', endTouch);
 graph.addEventListener('keydown', (e) => {
   if (e.key === 'Home') { stop(); seek(state.nowIdx); e.preventDefault(); return; }
   const d = { ArrowLeft: -1, ArrowRight: 1 }[e.key];

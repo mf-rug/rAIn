@@ -111,7 +111,7 @@ html, body {
 }
 .trust[hidden] { display: none; }
 
-.graph { margin: 14px 0 0; }
+.graph { margin: 14px 0 0; touch-action: none; }
 
 #graph {
   display: block;
