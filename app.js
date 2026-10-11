@@ -923,11 +923,12 @@ $('play').addEventListener('click', () => {
 });
 
 // ---------- forecast reliability ----------
-// job/verify.py scores how well recent forecasts held up per lead time (FSS,
-// 0–100) for ~40 km tiles around each place. Here: the values for the tile the
-// point is in, or for the whole country when the local area had too little rain.
+// job/verify.py scores how well recent forecasts held up per lead time: the
+// share of rain forecast in the right place at ~4 km (CSI, 0–100), for ~40 km
+// tiles around each place. Here: the values for the tile the point is in, or for
+// the whole country when the local area had too little rain.
 
-const GOOD = 60;   // FSS×100 from which a forecast "held up"
+const GOOD = 60;   // CSI×100 from which a forecast "held up": 60% of rain moments right
 
 function reliability(pt) {
   const sk = DEMO?.skill ?? state.skill;
@@ -948,7 +949,7 @@ function horizon(fss) {
   return k * 5;
 }
 
-// Reliability (FSS×100) at a timeline position, interpolated between lead
+// Reliability (CSI×100) at a timeline position, interpolated between lead
 // times; null for the past or when unknown.
 function trustAt(pos) {
   const r = reliability(state.point);
@@ -960,7 +961,7 @@ function trustAt(pos) {
   return a < 0 || b < 0 ? null : a + (b - a) * (k - i);
 }
 
-const trustOpacity = (v, floor = 0.25) => Math.max(floor, Math.min(1, floor + (1 - floor) * (v - 30) / (GOOD - 30)));
+const trustOpacity = (v, floor = 0.25) => Math.max(floor, Math.min(1, floor + (1 - floor) * (v - 20) / (GOOD - 20)));
 const trustWord = (v) => `${v >= 70 ? 'high' : v >= 50 ? 'moderate' : v >= 30 ? 'low' : 'very low'} reliability`;
 
 // KNMI vs Buienradar, 1 hour ahead, over the last days (job/compare.py).
@@ -1086,7 +1087,7 @@ function drawGraph(series) {
     rel.fss.forEach((v, k) => {
       const x = cx(state.nowIdx + k + 1);
       if (x > w || v < 0) return;
-      const op = Math.max(0.25, Math.min(1, 0.25 + 0.75 * (v - 30) / (GOOD - 30)));
+      const op = trustOpacity(v);
       el('stop', { offset: Math.max(0, Math.min(1, (x - nowX) / (w - nowX))), 'stop-color': '#fff', 'stop-opacity': op }, fade);
     });
     el('rect', { x: nowX, y: 0, width: w - nowX, height: h, fill: 'url(#trustfade)' }, el('mask', { id: 'trust-mask', maskUnits: 'userSpaceOnUse', x: 0, y: 0, width: w, height: h }, defs));
