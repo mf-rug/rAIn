@@ -267,25 +267,27 @@ function sample(f, pt) {
 // shift that best maps frame A onto frame B, then smooth the vectors into a
 // field. The shader warps both frames along it to draw in-between moments.
 
-const QW = W >> 2, QH = H >> 2;
 const GX = 14, GY = 15;    // flow grid
 const BLOCK = 12;          // half block size, quarter pixels (~50 km on the ground)
 const SEARCH = 3;          // max shift per 5 min, quarter pixels (~13 km, i.e. ~150 km/h)
 
-function quarter(bytes) {
+// Quarter-resolution copy of a w × h frame (its size kept on the array).
+function quarter(bytes, w = W, h = H) {
+  const QW = w >> 2, QH = h >> 2;
   const q = new Uint8Array(QW * QH);
   for (let y = 0; y < QH; y++) for (let x = 0; x < QW; x++) {
     let s = 0;
     for (let dy = 0; dy < 4; dy++) {
-      const row = (y * 4 + dy) * W + x * 4;
+      const row = (y * 4 + dy) * w + x * 4;
       s += bytes[row] + bytes[row + 1] + bytes[row + 2] + bytes[row + 3];
     }
     q[y * QW + x] = s >> 4;
   }
-  return q;
+  return Object.assign(q, { QW, QH });
 }
 
 function estimateFlow(qa, qb) {
+  const { QW, QH } = qa;
   const n = 2 * SEARCH + 1;
   const vx = new Float32Array(GX * GY), vy = new Float32Array(GX * GY);
   const known = new Uint8Array(GX * GY);
@@ -344,19 +346,20 @@ function estimateFlow(qa, qb) {
   return out;
 }
 
-function computeFlows(fr = state.frames) {
+function computeFlows(fr = state.frames, r = gpu, w = W, h = H) {
   for (let i = 0; i < fr.length - 1; i++) {
     const a = fr[i], b = fr[i + 1];
     if (a.flowTex || !a.bytes || !b.bytes) continue;
-    a.q ??= quarter(a.bytes);
-    b.q ??= quarter(b.bytes);
-    a.flowTex = gpu.flowTexture(estimateFlow(a.q, b.q));
+    a.q ??= quarter(a.bytes, w, h);
+    b.q ??= quarter(b.bytes, w, h);
+    a.flowTex = r.flowTexture(estimateFlow(a.q, b.q));
   }
 }
 
 // ---------- WebGL renderer ----------
 
-const gpu = (() => {
+// One renderer per radar grid (w × h): KNMI's, and DWD's for the map toggle.
+function makeRenderer(W, H) {
   const canvas = document.createElement('canvas');
   canvas.width = W; canvas.height = H;
   const gl = canvas.getContext('webgl', { premultipliedAlpha: true, alpha: true, antialias: false });
@@ -440,22 +443,28 @@ const gpu = (() => {
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     },
   };
-})();
+}
+
+const gpu = makeRenderer(W, H);
 
 // Draw the current timeline position, warping between the two nearest frames.
 function drawRadar() {
   // DWD when chosen and loaded; otherwise KNMI rather than an empty map.
-  const fr = state.mapSource === 'dwd' && dwd.frames.length ? dwd.frames : state.frames;
-  if (!fr.length) return gpu.draw(null);
+  const useDwd = state.mapSource === 'dwd' && dwd.renderer && dwd.frames.some((f) => f.tex);
+  const r = useDwd ? dwd.renderer : gpu;
+  gpu.canvas.style.visibility = useDwd ? 'hidden' : 'visible';
+  if (dwd.renderer) dwd.renderer.canvas.style.visibility = useDwd ? 'visible' : 'hidden';
+  const fr = useDwd ? dwd.frames : state.frames;
+  if (!fr.length) return r.draw(null);
   const i = Math.min(Math.floor(state.pos), fr.length - 1);
   const t = state.pos - i;
   const a = fr[i], b = fr[i + 1];
-  if (a?.tex && b?.tex && t > 0.001) gpu.draw(a.tex, b.tex, a.flowTex, t);
-  else if (a?.tex && t <= 0.5) gpu.draw(a.tex);
-  else if (b?.tex) gpu.draw(b.tex);
-  else gpu.draw(a?.tex ?? null);
+  if (a?.tex && b?.tex && t > 0.001) r.draw(a.tex, b.tex, a.flowTex, t);
+  else if (a?.tex && t <= 0.5) r.draw(a.tex);
+  else if (b?.tex) r.draw(b.tex);
+  else r.draw(a?.tex ?? null);
   // Further-ahead forecasts fade with today's reliability.
-  const trust = state.mapSource === 'knmi' ? trustAt(state.pos) : null;   // KNMI's reliability
+  const trust = useDwd ? null : trustAt(state.pos);   // KNMI's reliability
   gpu.canvas.style.opacity = trust == null ? 1 : trustOpacity(trust, 0.35);
 }
 
@@ -556,17 +565,19 @@ function showCoverage() {
   drawCoverage(state.mapSource === 'dwd' ? state.coverage.dwd : state.coverage.knmi);
 }
 
+// ring: one [lat, lon] ring, or several (exteriors and holes, even-odd).
 function drawCoverage(ring) {
   if (!ring?.length) return;
-  const key = `${ring.length}|${ring[0]}|${dark.matches}`;
+  const rings = typeof ring[0][0] === 'number' ? [ring] : ring;
+  const key = `${rings.length}|${rings[0].length}|${rings[0][0]}|${dark.matches}`;
   if (key === coverageKey) return;
   coverageKey = key;
   coverageLayers.forEach((l) => l.remove());
   const css = getComputedStyle(document.documentElement);
   const world = [[-85, -180], [-85, 180], [85, 180], [85, -180]];
   coverageLayers = [
-    L.polygon([world, ring], { pane: 'veil', stroke: false, fillColor: 'url(#nodata-hatch)', fillOpacity: 1, interactive: false }),
-    L.polygon(ring, { pane: 'veil', fill: false, color: css.getPropertyValue('--muted').trim(), weight: 1, opacity: 0.6, dashArray: '4 3', interactive: false }),
+    L.polygon([world, ...rings], { pane: 'veil', stroke: false, fillColor: 'url(#nodata-hatch)', fillOpacity: 1, interactive: false }),
+    L.polygon(rings, { pane: 'veil', fill: false, color: css.getPropertyValue('--muted').trim(), weight: 1, opacity: 0.6, dashArray: '4 3', interactive: false }),
   ];
   coverageLayers.forEach((l) => l.addTo(map));
   // The hatch pattern has to live in the same SVG as the polygon.
@@ -707,7 +718,7 @@ async function loadBuienradar(force) {
 // observed frame for the past hour. 255 = no data (DWD covers only the east).
 // Feeds the comparison line on the graph and, when switched on, the map.
 
-const dwd = { key: null, meta: null, fc: null, obs: new Map(), frames: [], built: new Map() };
+const dwd = { key: null, meta: null, fc: null, obs: new Map(), frames: [], built: new Map(), renderer: null, overlay: null };
 
 async function greyImage(url) {
   const img = await cachedImage(url, { colorSpaceConversion: 'none', premultiplyAlpha: 'none' });
@@ -721,12 +732,12 @@ async function greyImage(url) {
 
 async function loadDwd(meta) {
   if (!meta?.fc) return;
-  const key = [meta.fc, ...meta.obs.map((o) => o.file)].join();
+  const key = [meta.fc, ...meta.obs.map((o) => o.file), ...(meta.map?.fc ?? [])].join();
   if (key === dwd.key) return;
   try {
     const [fc, ...obs] = await Promise.all([meta.fc, ...meta.obs.map((o) => o.file)].map((f) => greyImage(meta.base + f)));
     Object.assign(dwd, { key, meta, fc, obs: new Map(meta.obs.map((o, i) => [Date.parse(o.t), obs[i]])) });
-    state.coverage.dwd = meta.coverage;
+    state.coverage.dwd = meta.map?.coverage ?? null;
     $('src-dwd').hidden = false;
     syncDwdFrames();
     if (state.mapSource === 'dwd') showCoverage();
@@ -762,37 +773,47 @@ function dwdSeries(pt) {
   return out;
 }
 
-// Map frames from DWD on the same timeline as KNMI's (built only when shown).
+// DWD's whole area on the map: its own grid and canvas (meta.map from the
+// job), one image per step, on the same timeline as KNMI's frames. Loaded and
+// built only while the DWD view is on.
 function syncDwdFrames() {
-  if (state.mapSource !== 'dwd' || !dwd.meta) return;
-  const m = dwd.meta, keep = new Map();
+  const m = dwd.meta?.map;
+  if (state.mapSource !== 'dwd' || !m) return;
+  if (!dwd.renderer || dwd.renderer.w !== m.w || dwd.renderer.h !== m.h) {
+    dwd.overlay?.remove();
+    dwd.renderer = Object.assign(makeRenderer(m.w, m.h), { w: m.w, h: m.h });
+    const bounds = L.latLngBounds(L.CRS.EPSG3857.unproject(L.point(m.x0, m.y0)), L.CRS.EPSG3857.unproject(L.point(m.x1, m.y1)));
+    dwd.overlay = new CanvasOverlay(dwd.renderer.canvas, bounds, { className: 'radar-frame', interactive: false }).addTo(map);
+    dwd.built = new Map();
+  }
+  const ref = Date.parse(dwd.meta.ref);
+  const obs = new Map(m.obs.map((o) => [Date.parse(o.t), o.file]));
+  const keep = new Map();
   dwd.frames = state.frames.map((f) => {
-    const win = dwdWindow(f.t);
-    const id = `${dwd.key}|${f.t}`;
-    let fr = dwd.built.get(id);
-    if (!fr) {
-      fr = { t: f.t };
-      if (win) {
-        const bytes = new Uint8Array(W * H);
-        for (let y = 0; y < m.h; y++) {
-          for (let x = 0; x < m.w; x++) {
-            const b = win[y * m.w + x];
-            if (b !== 255) bytes[(m.y0 + y) * W + m.x0 + x] = b;
-          }
-        }
-        fr.bytes = bytes;
-        fr.tex = gpu.frameTexture(bytes);
-      }
-    }
-    keep.set(id, fr);
+    const i = Math.round((f.t - ref) / STEP);
+    const file = f.t <= ref ? obs.get(f.t) : m.fc[i - 1];
+    if (!file) return { t: f.t };
+    const fr = dwd.built.get(file) ?? { t: f.t, file };
+    keep.set(file, fr);
     return fr;
   });
-  for (const [id, fr] of dwd.built) {
-    if (!keep.has(id)) { gpu.drop(fr.tex); gpu.drop(fr.flowTex); }
+  for (const [file, fr] of dwd.built) {
+    if (!keep.has(file)) { dwd.renderer.drop(fr.tex); dwd.renderer.drop(fr.flowTex); }
   }
   dwd.built = keep;
-  for (const fr of dwd.frames) { gpu.drop(fr.flowTex); fr.flowTex = null; }
-  computeFlows(dwd.frames);
+  for (const fr of dwd.frames) { dwd.renderer.drop(fr.flowTex); fr.flowTex = null; }
+  // Load what's missing; no data (255) is transparent, the hatching shows it.
+  for (const fr of dwd.frames.filter((x) => x.file && !x.bytes && !x.loading)) {
+    fr.loading = true;
+    greyImage(dwd.meta.base + fr.file).then((bytes) => {
+      for (let i = 0; i < bytes.length; i++) if (bytes[i] === 255) bytes[i] = 0;
+      fr.bytes = bytes;
+      fr.tex = dwd.renderer.frameTexture(bytes);
+      computeFlows(dwd.frames, dwd.renderer, m.w, m.h);
+      requestDraw();
+    }).catch((e) => console.warn('DWD frame unavailable', fr.file, e)).finally(() => { fr.loading = false; });
+  }
+  computeFlows(dwd.frames, dwd.renderer, m.w, m.h);
   requestDraw();
 }
 
@@ -928,7 +949,8 @@ async function update() {
   loadObserved();
   computeFlows();
   requestDraw();
-  pruneCache(new Set([...next.map((f) => f.url), ...(plan.dwd ? [plan.dwd.fc, ...plan.dwd.obs.map((o) => o.file)].map((f) => DATA + f) : [])]));
+  const dwdFiles = plan.dwd ? [plan.dwd.fc, ...plan.dwd.obs.map((o) => o.file), ...(plan.dwd.map?.fc ?? []), ...(plan.dwd.map?.obs ?? []).map((o) => o.file)] : [];
+  pruneCache(new Set([...next.map((f) => f.url), ...dwdFiles.map((f) => DATA + f)]));
   syncDwdFrames();
 
   // Now first, then the forecast in order, then the past.

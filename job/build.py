@@ -230,7 +230,7 @@ def main():
     # app works without it.
     dwd_meta = old.get("dwd") if (old.get("dwd") or {}).get("fc") else None
     try:
-        dwd_ref, dwd_grids = dwd.fetch()
+        dwd_ref, dwd_grids, dwd_frames, dwd_grid = dwd.fetch()
         fc_name = f"dwd-fc-{dwd_ref:%Y%m%d%H%M}.png"
         if not (OUT / fc_name).exists():
             dwd.forecast_image(dwd_grids).save(OUT / fc_name, optimize=True)
@@ -241,7 +241,23 @@ def main():
         dwd_obs = sorted({e["t"]: e for e in (dwd_meta or {}).get("obs", []) + [{"t": iso(dwd_ref), "file": obs_name}]
                           if e["t"] >= iso(oldest) and (OUT / e["file"]).exists()}.values(), key=lambda e: e["t"])
         compare.add_dwd(dwd_ref, dwd_grids)
-        dwd_meta = {"ref": iso(dwd_ref), "fc": fc_name, "obs": dwd_obs, "coverage": dwd.coverage(dwd_grids[0]), **dwd.WINDOW}
+
+        # DWD's whole area for the map: one image per step, observed frames kept
+        # for the past hour, coverage as polygons.
+        map_obs_name = f"dwd-map-obs-{dwd_ref:%Y%m%d%H%M}.png"
+        if not (OUT / map_obs_name).exists():
+            Image.fromarray(dwd_frames[0], "L").save(OUT / map_obs_name, optimize=True)
+        map_fc = []
+        for i, frame in enumerate(dwd_frames[1:25], start=1):
+            name = f"dwd-map-fc-{dwd_ref:%Y%m%d%H%M}-{i * 5:03d}.png"
+            if not (OUT / name).exists():
+                Image.fromarray(frame, "L").save(OUT / name, optimize=True)
+            map_fc.append(name)
+        old_map = (dwd_meta or {}).get("map") or {}
+        map_obs = sorted({e["t"]: e for e in old_map.get("obs", []) + [{"t": iso(dwd_ref), "file": map_obs_name}]
+                          if e["t"] >= iso(oldest) and (OUT / e["file"]).exists()}.values(), key=lambda e: e["t"])
+        dwd_meta = {"ref": iso(dwd_ref), "fc": fc_name, "obs": dwd_obs, **dwd.WINDOW,
+                    "map": {**dwd_grid, "fc": map_fc, "obs": map_obs, "coverage": dwd.map_coverage(dwd_frames[0], dwd_grid)}}
         print("dwd run", iso(dwd_ref))
     except Exception as e:
         print("dwd unavailable:", e)
@@ -271,6 +287,7 @@ def main():
     keep = {"index.json"} | {e["file"] for e in obs + fc}
     if dwd_meta:
         keep |= {dwd_meta["fc"]} | {e["file"] for e in dwd_meta["obs"]}
+        keep |= set(dwd_meta.get("map", {}).get("fc", [])) | {e["file"] for e in dwd_meta.get("map", {}).get("obs", [])}
     for p in OUT.glob("*.png"):
         if p.name not in keep:
             p.unlink()
