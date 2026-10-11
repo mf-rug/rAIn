@@ -224,16 +224,24 @@ def main():
     if COVERAGE:
         (OUT / "coverage.json").write_text(json.dumps(COVERAGE, separators=(",", ":")))
 
-    # DWD's nowcast: a compact image for the app's comparison line, and its
-    # values for the head-to-head. Optional: the app works without it.
-    dwd_meta = old.get("dwd")
+    # DWD's nowcast: its frames for the app's map toggle and comparison line
+    # (forecast stacked in one image, each run's +0 kept as an observed frame
+    # for the past hour), and its values for the head-to-head. Optional: the
+    # app works without it.
+    dwd_meta = old.get("dwd") if (old.get("dwd") or {}).get("fc") else None
     try:
         dwd_ref, dwd_grids = dwd.fetch()
-        name = f"dwd-{dwd_ref:%Y%m%d%H%M}.png"
-        if not (OUT / name).exists():
-            dwd.atlas(dwd_grids).save(OUT / name, optimize=True)
+        fc_name = f"dwd-fc-{dwd_ref:%Y%m%d%H%M}.png"
+        if not (OUT / fc_name).exists():
+            dwd.forecast_image(dwd_grids).save(OUT / fc_name, optimize=True)
+        obs_name = f"dwd-obs-{dwd_ref:%Y%m%d%H%M}.png"
+        if not (OUT / obs_name).exists():
+            Image.fromarray(dwd.encode(dwd_grids[0]), "L").save(OUT / obs_name, optimize=True)
+        oldest = t0 - PAST * STEP
+        dwd_obs = sorted({e["t"]: e for e in (dwd_meta or {}).get("obs", []) + [{"t": iso(dwd_ref), "file": obs_name}]
+                          if e["t"] >= iso(oldest) and (OUT / e["file"]).exists()}.values(), key=lambda e: e["t"])
         compare.add_dwd(dwd_ref, dwd_grids)
-        dwd_meta = {"file": name, "ref": iso(dwd_ref), **dwd.ATLAS}
+        dwd_meta = {"ref": iso(dwd_ref), "fc": fc_name, "obs": dwd_obs, "coverage": dwd.coverage(dwd_grids[0]), **dwd.WINDOW}
         print("dwd run", iso(dwd_ref))
     except Exception as e:
         print("dwd unavailable:", e)
@@ -260,7 +268,9 @@ def main():
     if skill:
         (OUT / "skill.json").write_text(json.dumps(skill, separators=(",", ":")))
 
-    keep = {"index.json"} | {e["file"] for e in obs + fc} | ({dwd_meta["file"]} if dwd_meta else set())
+    keep = {"index.json"} | {e["file"] for e in obs + fc}
+    if dwd_meta:
+        keep |= {dwd_meta["fc"]} | {e["file"] for e in dwd_meta["obs"]}
     for p in OUT.glob("*.png"):
         if p.name not in keep:
             p.unlink()

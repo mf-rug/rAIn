@@ -243,6 +243,28 @@ html, body {
 @keyframes pulse { 50% { opacity: 0.2; } }
 #graph .pending { animation: pulse 1.4s ease-in-out infinite; }
 
+.source {
+  position: absolute;
+  z-index: 500;
+  left: 12px;
+  bottom: 12px;
+  display: flex;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--paper);
+  overflow: hidden;
+}
+.source button {
+  padding: 6px 12px;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font: 700 13px var(--body);
+  cursor: pointer;
+}
+.source button[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
+.source button[hidden] { display: none; }
+
 .locate {
   position: absolute;
   z-index: 500;

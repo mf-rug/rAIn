@@ -65,6 +65,8 @@ const DEMO = new URLSearchParams(location.search).has('demo') ? {
   },
 } : null;
 const state = {
+  mapSource: 'knmi',     // radar shown on the map: 'knmi' or 'dwd'
+  coverage: { knmi: null, dwd: null },
   compare: null,        // KNMI vs Buienradar scores, from job/compare.py
   skill: null,          // recent forecast reliability, from job/verify.py
   src: null,            // 'data' (job output) or 'wms'
@@ -342,8 +344,7 @@ function estimateFlow(qa, qb) {
   return out;
 }
 
-function computeFlows() {
-  const fr = state.frames;
+function computeFlows(fr = state.frames) {
   for (let i = 0; i < fr.length - 1; i++) {
     const a = fr[i], b = fr[i + 1];
     if (a.flowTex || !a.bytes || !b.bytes) continue;
@@ -443,7 +444,8 @@ const gpu = (() => {
 
 // Draw the current timeline position, warping between the two nearest frames.
 function drawRadar() {
-  const fr = state.frames;
+  // DWD when chosen and loaded; otherwise KNMI rather than an empty map.
+  const fr = state.mapSource === 'dwd' && dwd.frames.length ? dwd.frames : state.frames;
   if (!fr.length) return gpu.draw(null);
   const i = Math.min(Math.floor(state.pos), fr.length - 1);
   const t = state.pos - i;
@@ -453,7 +455,7 @@ function drawRadar() {
   else if (b?.tex) gpu.draw(b.tex);
   else gpu.draw(a?.tex ?? null);
   // Further-ahead forecasts fade with today's reliability.
-  const trust = trustAt(state.pos);
+  const trust = state.mapSource === 'knmi' ? trustAt(state.pos) : null;   // KNMI's reliability
   gpu.canvas.style.opacity = trust == null ? 1 : trustOpacity(trust, 0.35);
 }
 
@@ -550,9 +552,12 @@ dark.addEventListener('change', () => { homeName = null; if (state.point) highli
 // not look like "dry". Hatched, under the radar layer like the country veil.
 let coverageLayers = [], coverageKey = '';
 
+function showCoverage() {
+  drawCoverage(state.mapSource === 'dwd' ? state.coverage.dwd : state.coverage.knmi);
+}
+
 function drawCoverage(ring) {
   if (!ring?.length) return;
-  store.set('coverage', ring);
   const key = `${ring.length}|${ring[0]}|${dark.matches}`;
   if (key === coverageKey) return;
   coverageKey = key;
@@ -573,7 +578,7 @@ function drawCoverage(ring) {
     <line x1="0" y1="0" x2="0" y2="7" stroke="${css.getPropertyValue('--muted').trim()}" stroke-width="1.5" stroke-opacity="0.35"/></pattern>`;
   svg.insertBefore(defs, svg.firstChild);
 }
-dark.addEventListener('change', () => drawCoverage(store.get('coverage')));
+dark.addEventListener('change', () => showCoverage());
 
 const marker = L.marker([FALLBACK.lat, FALLBACK.lng], {
   icon: L.divIcon({ className: 'here', iconSize: [14, 14] }),
@@ -696,42 +701,114 @@ async function loadBuienradar(force) {
   }
 }
 
-// ---------- DWD comparison ----------
-// DWD's nowcast (job/dwd.py): all 25 steps for the Netherlands area at ~2 km,
-// stacked in one greyscale image. 255 = DWD has no data there (west NL).
+// ---------- DWD ----------
+// DWD's nowcast (job/dwd.py) for the Netherlands window at ~1 km: the forecast
+// (+5 … +120 min) stacked in one image, plus each run's analysis kept as an
+// observed frame for the past hour. 255 = no data (DWD covers only the east).
+// Feeds the comparison line on the graph and, when switched on, the map.
 
-const dwd = { url: null, meta: null, bytes: null };
+const dwd = { key: null, meta: null, fc: null, obs: new Map(), frames: [], built: new Map() };
+
+async function greyImage(url) {
+  const img = await cachedImage(url, { colorSpaceConversion: 'none', premultiplyAlpha: 'none' });
+  const ctx = new OffscreenCanvas(img.width, img.height).getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(img, 0, 0);
+  const d = ctx.getImageData(0, 0, img.width, img.height).data;
+  const bytes = new Uint8Array(img.width * img.height);
+  for (let i = 0; i < bytes.length; i++) bytes[i] = d[i * 4];
+  return bytes;
+}
 
 async function loadDwd(meta) {
-  if (!meta || meta.url === dwd.url) return;
+  if (!meta?.fc) return;
+  const key = [meta.fc, ...meta.obs.map((o) => o.file)].join();
+  if (key === dwd.key) return;
   try {
-    const img = await cachedImage(meta.url, { colorSpaceConversion: 'none', premultiplyAlpha: 'none' });
-    const ctx = new OffscreenCanvas(img.width, img.height).getContext('2d', { willReadFrequently: true });
-    ctx.drawImage(img, 0, 0);
-    const d = ctx.getImageData(0, 0, img.width, img.height).data;
-    const bytes = new Uint8Array(img.width * img.height);
-    for (let i = 0; i < bytes.length; i++) bytes[i] = d[i * 4];
-    Object.assign(dwd, { url: meta.url, meta, bytes });
+    const [fc, ...obs] = await Promise.all([meta.fc, ...meta.obs.map((o) => o.file)].map((f) => greyImage(meta.base + f)));
+    Object.assign(dwd, { key, meta, fc, obs: new Map(meta.obs.map((o, i) => [Date.parse(o.t), obs[i]])) });
+    state.coverage.dwd = meta.coverage;
+    $('src-dwd').hidden = false;
+    syncDwdFrames();
+    if (state.mapSource === 'dwd') showCoverage();
     render();
   } catch (e) {
     console.warn('DWD unavailable', e);
   }
 }
 
+// DWD's window image (observed or forecast) for time t, or null.
+function dwdWindow(t) {
+  const m = dwd.meta;
+  if (!m || !dwd.fc) return null;
+  const ref = Date.parse(m.ref);
+  if (t <= ref) return dwd.obs.get(t) ?? null;
+  const i = Math.round((t - ref) / STEP) - 1;
+  return i >= 0 && i < 24 ? dwd.fc.subarray(i * m.w * m.h, (i + 1) * m.w * m.h) : null;
+}
+
 // DWD's values at the point: time → mm/h (no entries where DWD has no data).
 function dwdSeries(pt) {
   const out = new Map();
   const m = dwd.meta;
-  if (!m || !dwd.bytes || !pt) return out;
+  if (!m || !dwd.fc || !pt) return out;
   const [px, py] = pixelOf(pt);
-  const ax = Math.floor((px - m.x0) / m.step), ay = Math.floor((py - m.y0) / m.step);
+  const ax = px - m.x0, ay = py - m.y0;
   if (ax < 0 || ay < 0 || ax >= m.w || ay >= m.h) return out;
-  const ref = Date.parse(m.ref);
-  for (let i = 0; i < 25; i++) {
-    const b = dwd.bytes[(i * m.h + ay) * m.w + ax];
-    if (b !== 255) out.set(ref + i * STEP, fromByte(b));
+  for (const f of state.frames) {
+    const win = dwdWindow(f.t);
+    const b = win?.[ay * m.w + ax];
+    if (b != null && b !== 255) out.set(f.t, fromByte(b));
   }
   return out;
+}
+
+// Map frames from DWD on the same timeline as KNMI's (built only when shown).
+function syncDwdFrames() {
+  if (state.mapSource !== 'dwd' || !dwd.meta) return;
+  const m = dwd.meta, keep = new Map();
+  dwd.frames = state.frames.map((f) => {
+    const win = dwdWindow(f.t);
+    const id = `${dwd.key}|${f.t}`;
+    let fr = dwd.built.get(id);
+    if (!fr) {
+      fr = { t: f.t };
+      if (win) {
+        const bytes = new Uint8Array(W * H);
+        for (let y = 0; y < m.h; y++) {
+          for (let x = 0; x < m.w; x++) {
+            const b = win[y * m.w + x];
+            if (b !== 255) bytes[(m.y0 + y) * W + m.x0 + x] = b;
+          }
+        }
+        fr.bytes = bytes;
+        fr.tex = gpu.frameTexture(bytes);
+      }
+    }
+    keep.set(id, fr);
+    return fr;
+  });
+  for (const [id, fr] of dwd.built) {
+    if (!keep.has(id)) { gpu.drop(fr.tex); gpu.drop(fr.flowTex); }
+  }
+  dwd.built = keep;
+  for (const fr of dwd.frames) { gpu.drop(fr.flowTex); fr.flowTex = null; }
+  computeFlows(dwd.frames);
+  requestDraw();
+}
+
+// Map source toggle: KNMI (default) or DWD. Remembered per device.
+function setMapSource(src) {
+  state.mapSource = src === 'dwd' && dwd.meta ? 'dwd' : 'knmi';
+  store.set('map', state.mapSource);
+  for (const b of document.querySelectorAll('.source button')) {
+    b.setAttribute('aria-pressed', String(b.dataset.src === state.mapSource));
+  }
+  syncDwdFrames();
+  showCoverage();
+  requestDraw();
+}
+for (const b of document.querySelectorAll('.source button')) {
+  b.addEventListener('click', () => setMapSource(b.dataset.src));
 }
 
 // ---------- loading indicator ----------
@@ -781,7 +858,7 @@ async function fetchPlan() {
       const extra = (name) => fetch(`${DATA}${name}?v=${Math.floor(Date.now() / 30e3)}`, { cache: 'no-store' })
         .then((r) => (r.ok ? r.json() : null)).catch(() => null);
       const [skill, coverage, compare] = await Promise.all([extra('skill.json'), extra('coverage.json'), extra('compare.json')]);
-      const dwd = idx.dwd ? { ...idx.dwd, url: DATA + idx.dwd.file } : null;
+      const dwd = idx.dwd?.fc ? { ...idx.dwd, base: DATA } : null;
       return { t0, ref: Date.parse(idx.ref), data: [...entries(idx.obs, 'obs'), ...entries(idx.fc, 'fc')], skill, coverage, compare, dwd };
     }
     console.warn('job output is stale; using KNMI directly');
@@ -822,7 +899,9 @@ async function update() {
   state.skill = plan.skill ?? null;
   state.compare = plan.compare ?? null;
   loadDwd(plan.dwd);
-  drawCoverage(plan.coverage ?? store.get('coverage'));
+  if (plan.coverage) store.set('coverage', plan.coverage);
+  state.coverage.knmi = plan.coverage ?? store.get('coverage');
+  showCoverage();
   const { t0, ref } = plan;
   const due = dueAfter(t0, ref);
   state.nextCheck = Date.now() < due ? due : Date.now() + POLL_EVERY;
@@ -849,7 +928,8 @@ async function update() {
   loadObserved();
   computeFlows();
   requestDraw();
-  pruneCache(new Set(next.map((f) => f.url)));
+  pruneCache(new Set([...next.map((f) => f.url), ...(plan.dwd ? [plan.dwd.fc, ...plan.dwd.obs.map((o) => o.file)].map((f) => DATA + f) : [])]));
+  syncDwdFrames();
 
   // Now first, then the forecast in order, then the past.
   const idx = next.map((_, i) => i);
@@ -1299,6 +1379,8 @@ addEventListener('resize', render);
 // ---------- start ----------
 
 if (!gpu.ok) showStatus('This browser can’t draw the radar map (WebGL is unavailable).');
+state.mapSource = store.get('map') === 'dwd' ? 'dwd' : 'knmi';
+for (const b of document.querySelectorAll('.source button')) b.setAttribute('aria-pressed', String(b.dataset.src === state.mapSource));
 startLoading();
 locate();
 refresh();
