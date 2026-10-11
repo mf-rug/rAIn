@@ -590,6 +590,23 @@ async function highlightCountry(pt) {
 }
 dark.addEventListener('change', () => { homeName = null; if (state.point) highlightCountry(state.point); });
 
+// Country borders and coasts (Natural Earth), drawn over the radar: the dark
+// basemap's own borders are barely visible.
+let bordersLayer = null;
+const borders = fetch('borders.geojson').then((r) => r.json()).catch(() => null);
+async function drawBorders() {
+  const geo = await borders;
+  if (!geo) return;
+  bordersLayer?.remove();
+  const css = getComputedStyle(document.documentElement);
+  bordersLayer = L.geoJSON(geo, {
+    pane: 'labels', interactive: false,
+    style: { color: css.getPropertyValue('--muted').trim(), weight: 1, opacity: dark.matches ? 0.85 : 0.6 },
+  }).addTo(map);
+}
+drawBorders();
+dark.addEventListener('change', drawBorders);
+
 // Radar coverage: outside the area the radars see there is no data, which must
 // not look like "dry". Hatched, under the radar layer like the country veil.
 let coverageLayers = [], coverageKey = '';
@@ -687,7 +704,7 @@ $('locate').addEventListener('click', locate);
 // forget the stored data list (so data is checked now), then reload.
 $('reload').addEventListener('click', async () => {
   $('reload').classList.add('spinning');
-  await Promise.all(['./', 'app.js', 'style.css', 'countries.geojson', 'manifest.webmanifest']
+  await Promise.all(['./', 'app.js', 'style.css', 'countries.geojson', 'borders.geojson', 'manifest.webmanifest']
     .map((u) => fetch(u, { cache: 'reload' }).catch(() => {})));
   store.set('plan', null);
   location.reload();
