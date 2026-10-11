@@ -494,7 +494,14 @@ const CanvasOverlay = L.ImageOverlay.extend({
   },
 });
 
-const map = L.map('map', { zoomControl: false, attributionControl: false, minZoom: 6, maxZoom: 12 })
+// Zoom: quarter-level snapping (practically continuous; tiles are scaled in
+// between), a slower scroll wheel for trackpads, and room to zoom out to
+// Western Europe on a phone.
+const map = L.map('map', {
+  zoomControl: false, attributionControl: false,
+  minZoom: 4, maxZoom: 12,
+  zoomSnap: 0.25, zoomDelta: 0.5, wheelPxPerZoomLevel: 150,
+})
   .setView([FALLBACK.lat, FALLBACK.lng], 8);
 map.createPane('labels');
 map.getPane('labels').style.zIndex = 450;
