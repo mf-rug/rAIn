@@ -123,6 +123,12 @@ def fetch():
         dv = raw[drows, dcols].astype(np.float64)
         valid = dinside & (dv != what["nodata"])
         frames.append(_bytes(np.where(valid, to_mmh(dv), 0.0), valid))
+    # The forecast moves rain beyond what the radars see; clip every step to the
+    # analysis' coverage, so "no data" means the same area at every lead time.
+    for g in grids[1:]:
+        g[np.isnan(grids[0])] = np.nan
+    for f in frames[1:]:
+        f[frames[0] == 255] = 255
     return ref, grids, frames, meta
 
 
