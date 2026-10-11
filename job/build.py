@@ -94,6 +94,7 @@ def build_lookup():
 LOOKUP = None
 STERE = "+proj=stere +lat_0=90 +lon_0=0 +lat_ts=60 +a=6378137 +b=6356752 +x_0=0 +y_0=0 +units=km"
 COVERAGE = None   # outline of the area the radars actually see, from the latest observation
+OBS_VALID = None  # the same area as a mask on the app's grid (forecasts are clipped to it)
 
 
 def coverage_outline(valid):
@@ -148,7 +149,24 @@ def fetch_obs(t):
         raise
     raw = f["image1/image_data"][:]
     COVERAGE = COVERAGE or coverage_outline(raw < 65534)
-    return encode(raw)
+    grid = encode(raw)
+    global OBS_VALID
+    rows, cols, inside = LOOKUP
+    OBS_VALID = inside & (raw[rows, cols] < 65534)   # newest download wins (the loop runs oldest first)
+    np.savez_compressed(OUT / "state" / "obs-valid.npz", m=OBS_VALID)
+    return grid
+
+
+def clip(grids):
+    """KNMI's forecast moves rain beyond what the radars see (and never marks
+    no data there): keep forecast rain only where the observation has coverage."""
+    global OBS_VALID
+    if OBS_VALID is None and (OUT / "state" / "obs-valid.npz").exists():
+        OBS_VALID = np.load(OUT / "state" / "obs-valid.npz")["m"]
+    if OBS_VALID is not None:
+        for g in grids:
+            g[~OBS_VALID] = 0
+    return grids
 
 
 def fetch_run(ref):
@@ -159,7 +177,7 @@ def fetch_run(ref):
         if e.code in (403, 404):
             raise FileNotFoundError(ref) from e
         raise
-    return [encode(f[f"image{i}/image_data"][:]) for i in range(2, 26)]
+    return clip([encode(f[f"image{i}/image_data"][:]) for i in range(2, 26)])
 
 
 def main():
@@ -207,7 +225,7 @@ def main():
         fc = old["fc"]
     else:
         f = download(FC, fc_name)
-        grids = [encode(f[f"image{i}/image_data"][:]) for i in range(1, 26)]
+        grids = clip([encode(f[f"image{i}/image_data"][:]) for i in range(1, 26)])
         for i, grid in enumerate(grids):
             t = ref + i * STEP
             name = f"fc-{ref:%Y%m%d%H%M}-{t:%Y%m%d%H%M}.png"

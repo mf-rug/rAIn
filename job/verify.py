@@ -162,8 +162,11 @@ class Verifier:
         for p in self.dir.glob("*.npz"):
             if p.name == "scores.npz":
                 continue
-            kind, s = p.stem.split("-")
-            pt = datetime.strptime(s, "%Y%m%d%H%M").replace(tzinfo=timezone.utc)
+            try:
+                kind, s = p.stem.split("-")
+                pt = datetime.strptime(s, "%Y%m%d%H%M").replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue      # not one of ours (e.g. build.py's coverage mask)
             if pt < oldest_needed or (kind == "obs" and int(pt.timestamp()) in done and pt < t0 - STEP):
                 p.unlink()
         return scored, len(pending)
