@@ -500,7 +500,7 @@ const CanvasOverlay = L.ImageOverlay.extend({
 const map = L.map('map', {
   zoomControl: false, attributionControl: false,
   minZoom: 4, maxZoom: 12,
-  zoomSnap: 0.25, zoomDelta: 0.5, wheelPxPerZoomLevel: 150,
+  zoomSnap: 0.25, zoomDelta: 0.5, wheelPxPerZoomLevel: 80,
 })
   .setView([FALLBACK.lat, FALLBACK.lng], 8);
 map.createPane('labels');
