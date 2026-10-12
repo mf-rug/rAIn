@@ -56,13 +56,24 @@ const DEMO = new URLSearchParams(location.search).has('demo') ? {
   skill: (() => {
     const rain = Array.from({ length: 24 }, (_, k) => (k < 6 ? 970 - 30 * k : Math.max(80, 800 - (k - 5) * 50)));
     const dry = Array.from({ length: 24 }, (_, k) => 999 - 2 * k);
-    return { hours: 6, cell: 4, tile: 10, nx: 18, ny: 19, nl: { rain, dry }, rain: Array(18 * 19).fill(rain), dry: Array(18 * 19).fill(dry) };
+    const byDist = [[960, 45], [985, 20], [996, 6], [999, 1]].map(([a, d]) => Array.from({ length: 24 }, (_, k) => Math.max(500, a - d * k)));
+    return { hours: 6, cell: 4, tile: 10, nx: 18, ny: 19, rain: Array(18 * 19).fill(rain), dry: Array(18 * 19).fill(dry),
+      nl: { rain, dry, dry_by_distance: byDist, dry_bins: [1, 3, 7] } };
   })(),
   rain(m) { // minutes from now → mm/h
     const bump = (c, w, h) => h * Math.exp(-(((m - c) / w) ** 2));
     // Showery: short bursts of varying strength every 15–25 minutes.
     return [[-50, 0.8], [-28, 1.6], [-8, 0.6], [12, 1.4], [30, 2.8], [47, 0.9], [66, 3.2], [84, 1.3], [103, 2.2], [120, 0.9]]
       .reduce((sum, [c, h]) => sum + bump(c, 4.5, h), 0);
+  },
+  // Distance class for frame i: how close in time the nearest fake shower is
+  // (showers move past, so near in time ≈ near in space).
+  bin(i) {
+    const s = pointSeries();
+    for (let d = 0; d < s.length; d++) {
+      if ((s[i - d] ?? 0) >= 0.3 || (s[i + d] ?? 0) >= 0.3) return d <= 1 ? 0 : d <= 2 ? 1 : d <= 4 ? 2 : 3;
+    }
+    return 3;
   },
 } : null;
 const state = {
@@ -1094,9 +1105,40 @@ function reliability(pt) {
   const i = tx >= 0 && ty >= 0 && tx < sk.nx && ty < sk.ny ? ty * sk.nx + tx : -1;
   const known = (a) => a && a.filter((v) => v >= 0).length >= a.length / 2;
   const norm = (a) => (known(a) ? a.map((v) => (v < 0 ? null : v / 1000)) : null);
-  if (i >= 0 && (known(sk.rain[i]) || known(sk.dry[i]))) return { rain: norm(sk.rain[i]), dry: norm(sk.dry[i]), area: 'here' };
-  if (known(sk.nl.rain) || known(sk.nl.dry)) return { rain: norm(sk.nl.rain), dry: norm(sk.nl.dry), area: 'the Netherlands' };
-  return { rain: null, dry: null, area: null };
+  const byDist = (sk.nl.dry_by_distance ?? []).map(norm);
+  if (i >= 0 && (known(sk.rain[i]) || known(sk.dry[i]))) return { rain: norm(sk.rain[i]), dry: norm(sk.dry[i]), byDist, area: 'here' };
+  if (known(sk.nl.rain) || known(sk.nl.dry)) return { rain: norm(sk.nl.rain), dry: norm(sk.nl.dry), byDist, area: 'the Netherlands' };
+  return { rain: null, dry: null, byDist, area: null };
+}
+
+// Distance class from the point to the nearest forecast rain in frame i, as in
+// job/verify.py (DRY_BINS cells of ~4 km): 0 = adjacent, 1 = near, 2 = some
+// distance, 3 = far or none. A dry gap between showers is far less certain
+// than a spot with no rain around.
+const binCache = new Map();
+function dryBinAt(i) {
+  const f = state.frames[i], pt = state.point;
+  if (!f?.bytes || !pt) return null;
+  if (DEMO) return DEMO.bin(i);
+  const sk = state.skill, bins = sk?.nl?.dry_bins ?? [1, 3, 7], cell = sk?.cell ?? 4;
+  const [px, py] = pixelOf(pt);
+  const key = `${f.url}|${px},${py}`;
+  if (binCache.has(key)) return binCache.get(key);
+  if (binCache.size > 2000) binCache.clear();
+  const R = (bins[bins.length - 1] + 1) * cell, wet = toByte(0.3);
+  let best = Infinity;
+  for (let dy = -R; dy <= R; dy++) {
+    const y = py + dy;
+    if (y < 0 || y >= H) continue;
+    for (let dx = -R; dx <= R; dx++) {
+      const x = px + dx;
+      if (x < 0 || x >= W || f.bytes[y * W + x] < wet) continue;
+      best = Math.min(best, Math.ceil(Math.max(Math.abs(dx), Math.abs(dy)) / cell));
+    }
+  }
+  const bin = bins.findIndex((b) => best <= b);
+  binCache.set(key, bin < 0 ? bins.length : bin);
+  return binCache.get(key);
 }
 
 // Rain or dry, by what's forecast at frame i.
@@ -1105,7 +1147,12 @@ const kindAt = (series, i) => (series[i] != null && series[i] >= WET ? 'rain' : 
 // Reliability (0–1) of a kind at a timeline position, interpolated between
 // lead times; null for the past or when unknown.
 function trustAt(pos, kind) {
-  const a = reliability(state.point)?.[kind];
+  const r = reliability(state.point);
+  let a = r?.[kind];
+  if (kind === 'dry' && r?.byDist?.length) {
+    const b = dryBinAt(Math.round(pos));
+    if (b != null && r.byDist[b]) a = r.byDist[b];
+  }
   if (!a || pos <= state.nowIdx) return null;
   const lead = pos - state.nowIdx;                    // in 5-minute steps
   if (lead < 1) return a[0] == null ? null : 1 + (a[0] - 1) * lead;
@@ -1166,12 +1213,17 @@ function drawTrust(series) {
       : `Rain forecasts${where} have been unreliable today, even 10 minutes ahead.`;
     return;
   }
-  if (!r.dry) { p.textContent = `Too little rain in the last ${hours} hours to judge how reliable forecasts are today.`; return; }
-  const m = horizon(r.dry, SCALE.dry[0]);
+  // Per moment: dry reliability for how close forecast rain is at that moment.
+  const vals = [];
+  for (let i = state.nowIdx + 1; i < series.length; i++) vals.push(trustAt(i, 'dry'));
+  if (!vals.some((v) => v != null)) { p.textContent = `Too little rain in the last ${hours} hours to judge how reliable forecasts are today.`; return; }
+  const m = horizon(vals, SCALE.dry[0]);
+  const near = vals.some((v, k) => v != null && v < SCALE.dry[0] && dryBinAt(state.nowIdx + 1 + k) <= 1);
   const pct = (v) => `${Math.floor(v * 1000) / 10}%`;
-  p.textContent = m >= 120 ? `Dry forecasts${where} held up well today, even 2 hours ahead (${pct(r.dry[23])} right).`
-    : m >= 10 ? `Dry forecasts${where} held up well for about ${m} minutes today; showers popped up unforecast beyond that.`
-    : `Dry forecasts${where} have been unreliable today: showers keep popping up unforecast.`;
+  const worst = Math.min(...vals.filter((v) => v != null));
+  p.textContent = m >= vals.length * 5 ? `Dry forecasts held up well today, even 2 hours ahead (${pct(worst)} right).`
+    : m >= 10 ? `Dry for now; ${near ? 'with showers close by, ' : ''}dry forecasts held up well for about ${m} minutes today, less beyond.`
+    : `${near ? 'With showers this close, a' : 'A'} dry forecast has been unreliable today, even 10 minutes ahead.`;
 }
 
 // ---------- graph & verdict ----------

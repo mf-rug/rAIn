@@ -53,8 +53,11 @@ does and the data sources. This file is about how it's built and what bites.
   generous (0.68 at 1 h vs 31–40% right at the spot); then a single CSI was too
   harsh on dry, calm days (it ignores correct dry forecasts). Now two per-mille
   scores per lead and tile: *rain* (forecast rain → rained) and *dry* (forecast
-  dry → stayed dry), each with its own scale (`SCALE` in app.js). Check claims
-  against compare.json (point-based) when in doubt.
+  dry → stayed dry), each with its own scale (`SCALE` in app.js). Dry is also
+  scored nationally by distance to the nearest forecast rain (`DRY_BINS`), and
+  the app picks the class per frame (`dryBinAt`): a dry gap between showers is
+  much less certain than a spot with no rain around. Check claims against
+  compare.json (point-based) when in doubt.
 - **iOS touch:** shapes inside `#graph` are recreated on every move, so they have
   `pointer-events: none`, and touch scrubbing uses raw touch events with
   `preventDefault` (iOS otherwise takes the gesture over as a scroll).

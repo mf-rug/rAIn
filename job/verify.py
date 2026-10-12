@@ -11,6 +11,12 @@ Two reliabilities are published, because they answer different questions:
 On a day with a few small showers, rain forecasts beyond ~20 min are poor while
 dry forecasts are nearly always right; a single score can't say both.
 
+Dry forecasts are also scored by distance to the nearest forecast rain in that
+frame (DRY_BINS, in 4 km cells), nationally: a dry gap between forecast showers
+is far less certain than a spot with no rain for 50 km, and the overall average
+is dominated by the easy, far-away cases. The app looks up the class for each
+moment from the frame's own forecast.
+
 (Earlier versions used the Fractions Skill Score over ~13 km neighbourhoods,
 far too optimistic on showery days (0.68 vs 0.31 at the spot at 1 hour), and
 then a CSI, which ignores correct dry forecasts and so called dry, calm days
@@ -43,6 +49,8 @@ WET_MMH = 0.3             # wet/dry threshold
 CELL = 4                  # coarse cell, in frame pixels (~4 km)
 TILE = 10                 # tile, in cells (~40 km)
 MIN_RAIN = 400.0          # below this (weighted wet pixels) there's too little rain to judge
+DRY_BINS = (1, 3, 7)      # nearest forecast rain within 1, 3, 7 cells (~4, 13, 30 km), or further
+MIN_DRY = 2000.0          # weighted dry-forecast pixels below which a distance class can't be judged
 BUDGET = 20               # KNMI downloads per run for back-filling
 TIME_LIMIT = 180          # seconds per run for back-filling; the rest waits for the next run
 
@@ -65,6 +73,26 @@ def tile_sums(a):
     return padded.reshape(ny, TILE, nx, TILE).sum(axis=(1, 3))
 
 
+def rain_distance(wet):
+    """Chebyshev distance in cells to the nearest wet cell, capped at DRY_BINS[-1] + 1."""
+    far = DRY_BINS[-1] + 1
+    d = np.where(wet, 0, far)
+    cur = wet.copy()
+    for step in range(1, far):
+        p = np.pad(cur, 1)
+        cur = np.zeros_like(cur)
+        for dy in range(3):
+            for dx in range(3):
+                cur |= p[dy:dy + wet.shape[0], dx:dx + wet.shape[1]]
+        d[cur & (d == far)] = step
+    return d
+
+
+def dry_bin(d):
+    """Distance (cells) → class 0..len(DRY_BINS): 0 = adjacent … last = far."""
+    return np.searchsorted(np.array(DRY_BINS), d, side="left")
+
+
 def stamp(t):
     return t.strftime("%Y%m%d%H%M")
 
@@ -84,11 +112,13 @@ class Verifier:
         sf = self.dir / "scores.npz"
         z = np.load(sf) if sf.exists() else None
         self.keys = ("hit", "fwet", "owet", "cover")
-        if z is not None and all(k in z for k in self.keys):
+        if z is not None and all(k in z for k in self.keys + ("dry_px", "dry_miss")):
             self.times = list(z["times"])
             self.sums = {k: list(z[k]) for k in self.keys}
+            self.dry_px, self.dry_miss = list(z["dry_px"]), list(z["dry_miss"])
         else:  # none yet, or an earlier format: rebuild from scratch
             self.times, self.sums = [], {k: [] for k in self.keys}
+            self.dry_px, self.dry_miss = [], []
 
     # -- inputs, from state or KNMI (within the download budget) --
 
@@ -132,8 +162,11 @@ class Verifier:
         shape = (LEADS,) + tile_sums(o).shape
         hit, fwet = np.full(shape, np.nan, np.float32), np.full(shape, np.nan, np.float32)
         owet = np.repeat(tile_sums(o)[None], LEADS, axis=0)
-        cover = self.valid.astype(np.float32) if self.valid is not None else np.full(o.shape, CELL * CELL, np.float32)
-        cover = np.repeat(tile_sums(cover[:o.shape[0], :o.shape[1]])[None], LEADS, axis=0)
+        cell_cover = self.valid.astype(np.float32) if self.valid is not None else np.full(o.shape, CELL * CELL, np.float32)
+        cell_cover = cell_cover[:o.shape[0], :o.shape[1]]
+        cover = np.repeat(tile_sums(cell_cover)[None], LEADS, axis=0)
+        nb = len(DRY_BINS) + 1
+        dry_px, dry_miss = np.full((LEADS, nb), np.nan, np.float32), np.full((LEADS, nb), np.nan, np.float32)
         for k in range(1, LEADS + 1):
             r = self.run(t - k * STEP)
             if r is None:
@@ -143,11 +176,20 @@ class Verifier:
             f = r[k - 1].astype(np.float32)
             hit[k - 1] = tile_sums(np.minimum(f, o))
             fwet[k - 1] = tile_sums(f)
+            # Fully dry-forecast cells by distance to the nearest forecast rain.
+            b = dry_bin(rain_distance(f > 0))
+            dry = f == 0
+            for j in range(nb):
+                m = dry & (b == j)
+                dry_px[k - 1, j] = cell_cover[m].sum()
+                dry_miss[k - 1, j] = o[m].sum()
         owet[np.isnan(hit)] = np.nan
         cover[np.isnan(hit)] = np.nan
         self.times.append(int(t.timestamp()))
         for k, v in zip(self.keys, (hit, fwet, owet, cover)):
             self.sums[k].append(v)
+        self.dry_px.append(dry_px)
+        self.dry_miss.append(dry_miss)
         return True
 
     def update(self, t0):
@@ -170,6 +212,8 @@ class Verifier:
         keep = [i for i, ts in enumerate(self.times) if ts > start.timestamp()]
         self.times = [self.times[i] for i in keep]
         self.sums = {k: [v[i] for i in keep] for k, v in self.sums.items()}
+        self.dry_px = [self.dry_px[i] for i in keep]
+        self.dry_miss = [self.dry_miss[i] for i in keep]
         done = set(self.times)
         pending = [t for t in todo if int(t.timestamp()) not in done]
         oldest_needed = min(pending, default=t0) - LEADS * STEP
@@ -188,6 +232,7 @@ class Verifier:
     def save(self):
         if self.times:
             np.savez_compressed(self.dir / "scores.npz", times=np.array(self.times),
+                                dry_px=np.stack(self.dry_px), dry_miss=np.stack(self.dry_miss),
                                 **{k: np.stack(v) for k, v in self.sums.items()})
         self.missing = {m for m in self.missing if datetime.strptime(m.split("-")[1], "%Y%m%d%H%M").replace(tzinfo=timezone.utc) > datetime.now(timezone.utc) - timedelta(hours=HOURS + 3)}
         (self.dir / "missing.json").write_text(json.dumps(sorted(self.missing)))
@@ -218,6 +263,10 @@ class Verifier:
 
         rain, dry = scores({k: neigh(v) for k, v in tot.items()})                  # (LEADS, ny, nx)
         nrain, ndry = scores({k: v.sum(axis=(1, 2)) for k, v in tot.items()})
+        w2 = w[:, :, 0, 0][:, :, None]                                             # (T, 1, 1)
+        dpx = np.nansum(np.stack(self.dry_px) * w2, axis=0)                        # (LEADS, bins)
+        dmiss = np.nansum(np.stack(self.dry_miss) * w2, axis=0)
+        by_dist = np.where(dpx >= MIN_DRY, np.round(1000 * (dpx - dmiss) / np.maximum(dpx, 1e-9)), -1).astype(int)
         ny, nx = rain.shape[1:]
         return {
             "t0": t0.strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -229,7 +278,10 @@ class Verifier:
             "nx": int(nx),
             "ny": int(ny),
             # Per mille for leads 5 … 120 min; -1: too little rain to judge.
-            "nl": {"rain": nrain.tolist(), "dry": ndry.tolist()},
+            "nl": {"rain": nrain.tolist(), "dry": ndry.tolist(),
+                   # Dry reliability by distance to the nearest forecast rain:
+                   # one list per class (within 1, 3, 7 cells, further), per lead.
+                   "dry_by_distance": by_dist.T.tolist(), "dry_bins": list(DRY_BINS)},
             # Row-major tiles.
             "rain": rain.transpose(1, 2, 0).reshape(ny * nx, LEADS).tolist(),
             "dry": dry.transpose(1, 2, 0).reshape(ny * nx, LEADS).tolist(),
