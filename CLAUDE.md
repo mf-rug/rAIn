@@ -49,10 +49,12 @@ does and the data sources. This file is about how it's built and what bites.
 - **Buienradar's RainHistoryForecast starts with ~3 observed steps**, then a gap,
   then the forecast. Its first step is not its issue time. compare.py anchors all
   sources at the same moment F (snapshot) instead.
-- **Reliability was once too generous:** FSS over 13 km neighbourhoods gave 0.68
-  at 1 h while the forecast was right at the spot 31–40% of the time. Now CSI at
-  4 km; "held up well" = CSI ≥ 0.6. Check claims against compare.json
-  (point-based) when in doubt.
+- **Reliability, twice wrong before:** FSS over 13 km neighbourhoods was far too
+  generous (0.68 at 1 h vs 31–40% right at the spot); then a single CSI was too
+  harsh on dry, calm days (it ignores correct dry forecasts). Now two per-mille
+  scores per lead and tile: *rain* (forecast rain → rained) and *dry* (forecast
+  dry → stayed dry), each with its own scale (`SCALE` in app.js). Check claims
+  against compare.json (point-based) when in doubt.
 - **iOS touch:** shapes inside `#graph` are recreated on every move, so they have
   `pointer-events: none`, and touch scrubbing uses raw touch events with
   `preventDefault` (iOS otherwise takes the gesture over as a scroll).

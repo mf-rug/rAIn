@@ -54,8 +54,9 @@ const $ = (id) => document.getElementById(id);
 // minutes, then dropping off), to preview how the forecast display looks.
 const DEMO = new URLSearchParams(location.search).has('demo') ? {
   skill: (() => {
-    const fss = Array.from({ length: 24 }, (_, k) => (k < 6 ? 97 - 3 * k : Math.max(8, 80 - (k - 5) * 5)));
-    return { hours: 6, scored: 72, cell: 4, tile: 10, nx: 18, ny: 19, nl: fss, tiles: Array(18 * 19).fill(fss) };
+    const rain = Array.from({ length: 24 }, (_, k) => (k < 6 ? 970 - 30 * k : Math.max(80, 800 - (k - 5) * 50)));
+    const dry = Array.from({ length: 24 }, (_, k) => 999 - 2 * k);
+    return { hours: 6, cell: 4, tile: 10, nx: 18, ny: 19, nl: { rain, dry }, rain: Array(18 * 19).fill(rain), dry: Array(18 * 19).fill(dry) };
   })(),
   rain(m) { // minutes from now → mm/h
     const bump = (c, w, h) => h * Math.exp(-(((m - c) / w) ** 2));
@@ -464,8 +465,8 @@ function drawRadar() {
   else if (b?.tex) r.draw(b.tex);
   else r.draw(a?.tex ?? null);
   // Further-ahead forecasts fade with today's reliability.
-  const trust = useDwd ? null : trustAt(state.pos);   // KNMI's reliability
-  gpu.canvas.style.opacity = trust == null ? 1 : trustOpacity(trust, 0.35);
+  const trust = useDwd ? null : trustAt(state.pos, 'rain');   // KNMI's, for the rain it shows
+  gpu.canvas.style.opacity = trust == null ? 1 : trustOpacity(confidence('rain', trust), 0.35);
 }
 
 let drawQueued = false;
@@ -1075,46 +1076,61 @@ $('play').addEventListener('click', () => {
 });
 
 // ---------- forecast reliability ----------
-// job/verify.py scores how well recent forecasts held up per lead time: the
-// share of rain forecast in the right place at ~4 km (CSI, 0–100), for ~40 km
-// tiles around each place. Here: the values for the tile the point is in, or for
-// the whole country when the local area had too little rain.
+// job/verify.py scores, per lead time and ~40 km tile, two things:
+//   rain: when rain was forecast, how often it rained
+//   dry:  when dry was forecast, how often it stayed dry
+// Each moment uses the one matching its forecast: a few small showers make rain
+// forecasts poor beyond ~20 min while dry forecasts stay nearly always right.
+// Values for the point's tile (with neighbours), or nationally when the area
+// had too little rain.
 
-const GOOD = 60;   // CSI×100 from which a forecast "held up": 60% of rain moments right
+const SCALE = { rain: [0.7, 0.5, 0.3], dry: [0.98, 0.95, 0.9] };   // high / moderate / low from
 
 function reliability(pt) {
   const sk = DEMO?.skill ?? state.skill;
-  if (!sk || !pt) return null;
+  if (!sk?.rain || !pt) return null;
   const [px, py] = pixelOf(pt);
   const tx = Math.floor(px / sk.cell / sk.tile), ty = Math.floor(py / sk.cell / sk.tile);
-  const local = tx >= 0 && ty >= 0 && tx < sk.nx && ty < sk.ny ? sk.tiles[ty * sk.nx + tx] : null;
+  const i = tx >= 0 && ty >= 0 && tx < sk.nx && ty < sk.ny ? ty * sk.nx + tx : -1;
   const known = (a) => a && a.filter((v) => v >= 0).length >= a.length / 2;
-  if (known(local)) return { fss: local, area: 'here' };
-  if (known(sk.nl)) return { fss: sk.nl, area: 'the Netherlands' };
-  return { fss: null, area: null };
+  const norm = (a) => (known(a) ? a.map((v) => (v < 0 ? null : v / 1000)) : null);
+  if (i >= 0 && (known(sk.rain[i]) || known(sk.dry[i]))) return { rain: norm(sk.rain[i]), dry: norm(sk.dry[i]), area: 'here' };
+  if (known(sk.nl.rain) || known(sk.nl.dry)) return { rain: norm(sk.nl.rain), dry: norm(sk.nl.dry), area: 'the Netherlands' };
+  return { rain: null, dry: null, area: null };
 }
 
-// Minutes ahead for which forecasts kept scoring GOOD (0 if not even 5 min).
-function horizon(fss) {
+// Rain or dry, by what's forecast at frame i.
+const kindAt = (series, i) => (series[i] != null && series[i] >= WET ? 'rain' : 'dry');
+
+// Reliability (0–1) of a kind at a timeline position, interpolated between
+// lead times; null for the past or when unknown.
+function trustAt(pos, kind) {
+  const a = reliability(state.point)?.[kind];
+  if (!a || pos <= state.nowIdx) return null;
+  const lead = pos - state.nowIdx;                    // in 5-minute steps
+  if (lead < 1) return a[0] == null ? null : 1 + (a[0] - 1) * lead;
+  const k = Math.min(a.length - 1, lead - 1), i = Math.floor(k);
+  const x = a[i], y = a[Math.min(i + 1, a.length - 1)];
+  return x == null || y == null ? null : x + (y - x) * (k - i);
+}
+
+// 0–1 confidence on each kind's own scale (dry forecasts are right far more often).
+function confidence(kind, v) {
+  const [high, mid, low] = SCALE[kind], floor = low - (mid - low);
+  return Math.max(0, Math.min(1, (v - floor) / (high - floor)));
+}
+const trustOpacity = (n, floor = 0.25) => floor + (1 - floor) * n;
+const trustWord = (kind, v) => {
+  const [high, mid, low] = SCALE[kind];
+  return `${v >= high ? 'high' : v >= mid ? 'moderate' : v >= low ? 'low' : 'very low'} reliability`;
+};
+
+// Minutes ahead for which a kind stayed at or above a level (0 if not even 5 min).
+function horizon(a, level) {
   let k = 0;
-  while (k < fss.length && fss[k] >= GOOD) k++;
+  while (k < a.length && a[k] != null && a[k] >= level) k++;
   return k * 5;
 }
-
-// Reliability (CSI×100) at a timeline position, interpolated between lead
-// times; null for the past or when unknown.
-function trustAt(pos) {
-  const r = reliability(state.point);
-  if (!r?.fss || pos <= state.nowIdx) return null;
-  const lead = pos - state.nowIdx;                    // in 5-minute steps
-  if (lead < 1) return r.fss[0] < 0 ? null : 100 + (r.fss[0] - 100) * lead;
-  const k = Math.min(r.fss.length - 1, lead - 1), i = Math.floor(k);
-  const a = r.fss[i], b = r.fss[Math.min(i + 1, r.fss.length - 1)];
-  return a < 0 || b < 0 ? null : a + (b - a) * (k - i);
-}
-
-const trustOpacity = (v, floor = 0.25) => Math.max(floor, Math.min(1, floor + (1 - floor) * (v - 20) / (GOOD - 20)));
-const trustWord = (v) => `${v >= 70 ? 'high' : v >= 50 ? 'moderate' : v >= 30 ? 'low' : 'very low'} reliability`;
 
 // KNMI vs Buienradar, 1 hour ahead, over the last days (job/compare.py).
 function drawCompare() {
@@ -1134,20 +1150,28 @@ function drawCompare() {
   p.textContent = `Rain correctly forecast 1 hour ahead (${days}): KNMI ${pct(k.csi)} · Buienradar ${pct(b.csi)}.${east}`;
 }
 
-function drawTrust() {
+function drawTrust(series) {
   const r = reliability(state.point);
   const p = $('trust');
   if (!r) { p.hidden = true; return; }
   p.hidden = false;
-  if (!r.fss) {
-    p.textContent = `Too little rain in the last ${(DEMO?.skill ?? state.skill).hours} hours to judge how reliable forecasts are today.`;
+  const hours = (DEMO?.skill ?? state.skill).hours;
+  const where = r.area === 'here' ? '' : ` across ${r.area}`;
+  const rainAhead = series.slice(state.nowIdx).some((v) => v != null && v >= WET);
+  if (rainAhead) {
+    if (!r.rain) { p.textContent = `Too little rain in the last ${hours} hours to judge how reliable rain forecasts are today.`; return; }
+    const m = horizon(r.rain, 0.6);
+    p.textContent = m >= 120 ? `Rain forecasts${where} held up well for the full 2 hours today.`
+      : m >= 10 ? `Rain forecasts${where} held up well for about ${m} minutes today; less reliable beyond.`
+      : `Rain forecasts${where} have been unreliable today, even 10 minutes ahead.`;
     return;
   }
-  const m = horizon(r.fss);
-  const where = r.area === 'here' ? '' : ` across ${r.area}`;
-  p.textContent = m >= 120 ? `Today's forecasts${where} held up well for the full 2 hours.`
-    : m >= 10 ? `Today's forecasts${where} held up well for about ${m} minutes; less reliable beyond.`
-    : `Today's forecasts${where} have been unreliable, even 10 minutes ahead.`;
+  if (!r.dry) { p.textContent = `Too little rain in the last ${hours} hours to judge how reliable forecasts are today.`; return; }
+  const m = horizon(r.dry, SCALE.dry[0]);
+  const pct = (v) => `${Math.floor(v * 1000) / 10}%`;
+  p.textContent = m >= 120 ? `Dry forecasts${where} held up well today, even 2 hours ahead (${pct(r.dry[23])} right).`
+    : m >= 10 ? `Dry forecasts${where} held up well for about ${m} minutes today; showers popped up unforecast beyond that.`
+    : `Dry forecasts${where} have been unreliable today: showers keep popping up unforecast.`;
 }
 
 // ---------- graph & verdict ----------
@@ -1181,7 +1205,7 @@ function render() {
   const series = pointSeries();
   drawGraph(series);
   drawVerdict(series);
-  drawTrust();
+  drawTrust(series);
   drawCompare();
   drawReadout(series);
 }
@@ -1233,15 +1257,17 @@ function drawGraph(series) {
   el('rect', { x: nowX, y: 0, width: w - nowX, height: h }, el('clipPath', { id: 'clip-ahead' }, defs));
   // Forecast fades out with today's reliability at each lead time.
   const rel = reliability(state.point);
-  if (rel?.fss) {
+  // Confidence per forecast frame, from the reliability of what it forecasts.
+  const conf = [];
+  for (let i = state.nowIdx + 1; i < series.length; i++) {
+    const kind = kindAt(series, i), v = trustAt(i, kind);
+    if (v != null) conf.push([cx(i), confidence(kind, v)]);
+  }
+  const offset = (x) => Math.max(0, Math.min(1, (x - nowX) / (w - nowX)));
+  if (conf.length) {
     const fade = el('linearGradient', { id: 'trustfade', gradientUnits: 'userSpaceOnUse', x1: nowX, y1: 0, x2: w, y2: 0 }, defs);
     el('stop', { offset: 0, 'stop-color': '#fff' }, fade);
-    rel.fss.forEach((v, k) => {
-      const x = cx(state.nowIdx + k + 1);
-      if (x > w || v < 0) return;
-      const op = trustOpacity(v);
-      el('stop', { offset: Math.max(0, Math.min(1, (x - nowX) / (w - nowX))), 'stop-color': '#fff', 'stop-opacity': op }, fade);
-    });
+    for (const [x, n] of conf) el('stop', { offset: offset(x), 'stop-color': '#fff', 'stop-opacity': trustOpacity(n) }, fade);
     el('rect', { x: nowX, y: 0, width: w - nowX, height: h, fill: 'url(#trustfade)' }, el('mask', { id: 'trust-mask', maskUnits: 'userSpaceOnUse', x: 0, y: 0, width: w, height: h }, defs));
   }
 
@@ -1254,15 +1280,11 @@ function drawGraph(series) {
 
   // Reliability strip under the forecast: solid where today's forecasts held
   // up, fading gradually as they held up less.
-  if (rel?.fss) {
+  if (conf.length) {
     const strip = el('linearGradient', { id: 'truststrip', gradientUnits: 'userSpaceOnUse', x1: nowX, y1: 0, x2: w, y2: 0 }, defs);
     const color = getComputedStyle(document.documentElement).getPropertyValue('--rain').trim();
     el('stop', { offset: 0, 'stop-color': color }, strip);
-    rel.fss.forEach((v, k) => {
-      const x = cx(state.nowIdx + k + 1);
-      if (x > w || v < 0) return;
-      el('stop', { offset: Math.max(0, Math.min(1, (x - nowX) / (w - nowX))), 'stop-color': color, 'stop-opacity': trustOpacity(v, 0.1) }, strip);
-    });
+    for (const [x, n] of conf) el('stop', { offset: offset(x), 'stop-color': color, 'stop-opacity': trustOpacity(n, 0.1) }, strip);
     const sy = base + 5;
     el('rect', { x: nowX, y: sy, width: w - nowX, height: 4, rx: 2, fill: 'url(#truststrip)' }, graph);
     el('text', { x: nowX - 6, y: sy + 4, 'text-anchor': 'end', class: 'band' }, graph).textContent = 'reliability';
@@ -1276,7 +1298,7 @@ function drawGraph(series) {
       const area = `${line}L${run[run.length - 1][0]},${base}L${run[0][0]},${base}Z`;
       for (const [clip, cls] of [['clip-past', 'past'], ['clip-ahead', '']]) {
         const g = el('g', { 'clip-path': `url(#${clip})`, class: cls }, graph);
-        if (clip === 'clip-ahead' && rel?.fss) g.setAttribute('mask', 'url(#trust-mask)');
+        if (clip === 'clip-ahead' && conf.length) g.setAttribute('mask', 'url(#trust-mask)');
         el('path', { d: area, class: 'area' }, g);
         el('path', { d: line, class: 'curve' }, g);
       }
@@ -1413,8 +1435,9 @@ function drawReadout(series) {
   const kind = state.pos > state.nowIdx ? 'forecast' : 'radar';
   const when = atNow ? `now (${hhmm(tm)})` : `${hhmm(tm)} ${kind}`;
   const what = v === null ? 'loading…' : v < WET ? 'dry' : `${intensity(v)} rain, ${v.toFixed(1)}\u00a0mm/h`;
-  const trust = trustAt(state.pos);
-  const sure = trust == null || atNow ? '' : ` · ${trustWord(trust)}`;
+  const tkind = v != null && v >= WET ? 'rain' : 'dry';
+  const trust = trustAt(state.pos, tkind);
+  const sure = trust == null || atNow ? '' : ` · ${trustWord(tkind, trust)}`;
   const bv = br.series.get(fr[Math.round(state.pos)]?.t);
   const dv = dwdSeries(state.point).get(fr[Math.round(state.pos)]?.t);
   const fmt = (x) => (x < WET ? 'dry' : `${x.toFixed(1)}\u00a0mm/h`);

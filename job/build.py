@@ -157,6 +157,13 @@ def fetch_obs(t):
     return grid
 
 
+def verify_coarse_cover(mask):
+    """Covered pixels per 4 km cell, the verifier's grid."""
+    from verify import CELL
+    h, w = (mask.shape[0] // CELL) * CELL, (mask.shape[1] // CELL) * CELL
+    return mask[:h, :w].reshape(h // CELL, CELL, w // CELL, CELL).sum(axis=(1, 3))
+
+
 def clip(grids):
     """KNMI's forecast moves rain beyond what the radars see (and never marks
     no data there): keep forecast rain only where the observation has coverage."""
@@ -186,6 +193,8 @@ def main():
     if (OUT / "index.json").exists():
         old = json.loads((OUT / "index.json").read_text())
     verifier = Verifier(OUT, fetch_obs, fetch_run)
+    if (OUT / "state" / "obs-valid.npz").exists():
+        verifier.valid = verify_coarse_cover(np.load(OUT / "state" / "obs-valid.npz")["m"])
     compare = Compare(OUT)
 
     # Newest observed frame; KNMI publishes ~2 min after the nominal time. If

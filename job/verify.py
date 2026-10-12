@@ -1,24 +1,31 @@
 """How well did recent forecasts hold up, per lead time and region?
 
 Each observed frame at time t is compared with what the forecast runs issued
-5, 10, … 120 minutes earlier predicted for t. The score is the share of rain
-that was forecast in the right place (a critical success index at ~4 km):
-within each 4 km cell, wet pixels forecast and observed overlap (hits) or not
-(misses, false alarms), CSI = overlap / union. Dry areas where both agree
-contribute nothing, so a dry day doesn't look "perfect".
+5, 10, … 120 minutes earlier predicted for t, at ~4 km: within each 4 km cell,
+wet pixels forecast and observed overlap (hits) or not (misses, false alarms);
+the rest of the covered pixels are correct "dry" forecasts.
 
-(An earlier version used the Fractions Skill Score over ~13 km neighbourhoods.
-On showery days that credits "about the right amount of rain nearby" and came
-out far more optimistic than scoring at the spot: 0.68 vs 0.31 at 1 hour.)
+Two reliabilities are published, because they answer different questions:
+  rain: when rain was forecast, how often it rained   = hits / forecast wet
+  dry:  when dry was forecast, how often it stayed dry = correct dry / forecast dry
+On a day with a few small showers, rain forecasts beyond ~20 min are poor while
+dry forecasts are nearly always right; a single score can't say both.
+
+(Earlier versions used the Fractions Skill Score over ~13 km neighbourhoods,
+far too optimistic on showery days (0.68 vs 0.31 at the spot at 1 hour), and
+then a CSI, which ignores correct dry forecasts and so called dry, calm days
+"unreliable".)
 
 Scores are kept per ~40 km tile for the last HOURS and published as
 skill.json: for every tile (combined with its neighbours) and lead time, the
-recency-weighted CSI over the window, or -1 where too little rain fell to say.
+recency-weighted rain and dry reliabilities (per mille), or -1 where too little
+rain was forecast or fell to say.
 
 State lives in OUT/state (stored on the data branch, not deployed):
   run-YYYYmmddHHMM.npz   coarse wet counts for a forecast run's 24 lead frames
   obs-YYYYmmddHHMM.npz   coarse wet counts for an observed frame
-  scores.npz             per scored time: overlap and union sums per lead and tile
+  scores.npz             per scored time: hit, forecast-wet, observed-wet and covered
+                         pixel sums per lead and tile
   missing.json           KNMI files that don't exist (so they aren't retried)
 """
 
@@ -69,16 +76,19 @@ class Verifier:
         self.dir = out / "state"
         self.dir.mkdir(parents=True, exist_ok=True)
         self.fetch_obs, self.fetch_run = fetch_obs, fetch_run
+        self.valid = None    # covered pixels per 4 km cell (set by build.py); None: all
         self.budget = BUDGET
         self.deadline = time.time() + TIME_LIMIT
         mf = self.dir / "missing.json"
         self.missing = set(json.loads(mf.read_text())) if mf.exists() else set()
         sf = self.dir / "scores.npz"
         z = np.load(sf) if sf.exists() else None
-        if z is not None and "hit" in z:
-            self.times, self.hit, self.union = list(z["times"]), list(z["hit"]), list(z["union"])
-        else:  # none yet, or the earlier FSS format: rebuild from scratch
-            self.times, self.hit, self.union = [], [], []
+        self.keys = ("hit", "fwet", "owet", "cover")
+        if z is not None and all(k in z for k in self.keys):
+            self.times = list(z["times"])
+            self.sums = {k: list(z[k]) for k in self.keys}
+        else:  # none yet, or an earlier format: rebuild from scratch
+            self.times, self.sums = [], {k: [] for k in self.keys}
 
     # -- inputs, from state or KNMI (within the download budget) --
 
@@ -119,8 +129,11 @@ class Verifier:
         if o is None:
             return False
         o = o.astype(np.float32)
-        hit = np.full((LEADS,) + tile_sums(o).shape, np.nan, np.float32)
-        union = np.full_like(hit, np.nan)
+        shape = (LEADS,) + tile_sums(o).shape
+        hit, fwet = np.full(shape, np.nan, np.float32), np.full(shape, np.nan, np.float32)
+        owet = np.repeat(tile_sums(o)[None], LEADS, axis=0)
+        cover = self.valid.astype(np.float32) if self.valid is not None else np.full(o.shape, CELL * CELL, np.float32)
+        cover = np.repeat(tile_sums(cover[:o.shape[0], :o.shape[1]])[None], LEADS, axis=0)
         for k in range(1, LEADS + 1):
             r = self.run(t - k * STEP)
             if r is None:
@@ -129,10 +142,12 @@ class Verifier:
                 return False          # out of budget: try again next time
             f = r[k - 1].astype(np.float32)
             hit[k - 1] = tile_sums(np.minimum(f, o))
-            union[k - 1] = tile_sums(np.maximum(f, o))
+            fwet[k - 1] = tile_sums(f)
+        owet[np.isnan(hit)] = np.nan
+        cover[np.isnan(hit)] = np.nan
         self.times.append(int(t.timestamp()))
-        self.hit.append(hit)
-        self.union.append(union)
+        for k, v in zip(self.keys, (hit, fwet, owet, cover)):
+            self.sums[k].append(v)
         return True
 
     def update(self, t0):
@@ -154,8 +169,7 @@ class Verifier:
         # Forget scores outside the window and inputs no longer needed.
         keep = [i for i, ts in enumerate(self.times) if ts > start.timestamp()]
         self.times = [self.times[i] for i in keep]
-        self.hit = [self.hit[i] for i in keep]
-        self.union = [self.union[i] for i in keep]
+        self.sums = {k: [v[i] for i in keep] for k, v in self.sums.items()}
         done = set(self.times)
         pending = [t for t in todo if int(t.timestamp()) not in done]
         oldest_needed = min(pending, default=t0) - LEADS * STEP
@@ -173,42 +187,50 @@ class Verifier:
 
     def save(self):
         if self.times:
-            np.savez_compressed(self.dir / "scores.npz", times=np.array(self.times), hit=np.stack(self.hit), union=np.stack(self.union))
+            np.savez_compressed(self.dir / "scores.npz", times=np.array(self.times),
+                                **{k: np.stack(v) for k, v in self.sums.items()})
         self.missing = {m for m in self.missing if datetime.strptime(m.split("-")[1], "%Y%m%d%H%M").replace(tzinfo=timezone.utc) > datetime.now(timezone.utc) - timedelta(hours=HOURS + 3)}
         (self.dir / "missing.json").write_text(json.dumps(sorted(self.missing)))
 
     # -- publishing --
 
     def summary(self, t0):
-        """Recency-weighted CSI per lead for each tile (with its neighbours) and nationally."""
+        """Recency-weighted rain and dry reliability per lead, for each tile (with
+        its neighbours) and nationally, in per mille."""
         if not self.times:
             return None
         ages = (t0.timestamp() - np.array(self.times)) / 3600
         w = (0.5 ** (ages / HALF_LIFE_H)).astype(np.float32)[:, None, None, None]
-        hit = np.nansum(np.stack(self.hit) * w, axis=0)       # (LEADS, ny, nx)
-        union = np.nansum(np.stack(self.union) * w, axis=0)
+        tot = {k: np.nansum(np.stack(v) * w, axis=0) for k, v in self.sums.items()}   # (LEADS, ny, nx)
 
-        def csi(h, u):
-            return np.where(u >= MIN_RAIN, np.round(100 * h / np.maximum(u, 1e-9)), -1).astype(int)
+        def scores(t):
+            h, fw, ow, cv = t["hit"], t["fwet"], t["owet"], t["cover"]
+            miss = ow - h
+            dry_fc = np.maximum(cv - fw, 1e-9)                 # pixels forecast dry
+            rain = np.where(fw >= MIN_RAIN, np.round(1000 * h / np.maximum(fw, 1e-9)), -1)
+            dry = np.where(fw + ow >= MIN_RAIN, np.round(1000 * (dry_fc - miss) / dry_fc), -1)
+            return rain.astype(int), dry.astype(int)
 
         # Each tile is judged together with its 8 neighbours.
         def neigh(a):
             p = np.pad(a, ((0, 0), (1, 1), (1, 1)))
             return sum(p[:, dy:dy + a.shape[1], dx:dx + a.shape[2]] for dy in range(3) for dx in range(3))
 
-        local = csi(neigh(hit), neigh(union))                    # (LEADS, ny, nx)
-        national = csi(hit.sum(axis=(1, 2)), union.sum(axis=(1, 2)))
-        ny, nx = local.shape[1:]
+        rain, dry = scores({k: neigh(v) for k, v in tot.items()})                  # (LEADS, ny, nx)
+        nrain, ndry = scores({k: v.sum(axis=(1, 2)) for k, v in tot.items()})
+        ny, nx = rain.shape[1:]
         return {
             "t0": t0.strftime("%Y-%m-%dT%H:%M:%SZ"),
             "hours": HOURS,
             "scored": len(self.times),
-            "score": "csi",
+            "score": "rain+dry",
             "cell": CELL,
             "tile": TILE,
             "nx": int(nx),
             "ny": int(ny),
-            "nl": national.tolist(),
-            # Row-major tiles, each a list of CSI×100 for leads 5…120 min (-1: too little rain).
-            "tiles": local.transpose(1, 2, 0).reshape(ny * nx, LEADS).tolist(),
+            # Per mille for leads 5 … 120 min; -1: too little rain to judge.
+            "nl": {"rain": nrain.tolist(), "dry": ndry.tolist()},
+            # Row-major tiles.
+            "rain": rain.transpose(1, 2, 0).reshape(ny * nx, LEADS).tolist(),
+            "dry": dry.transpose(1, 2, 0).reshape(ny * nx, LEADS).tolist(),
         }
