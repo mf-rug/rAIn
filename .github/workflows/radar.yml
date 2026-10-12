@@ -63,7 +63,12 @@ jobs:
           git add -A
           git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
             commit -qm "radar $(jq -r .t0 index.json), forecast $(jq -r .ref index.json)"
-          git push -qf "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" data
+          # GitHub occasionally rejects a push with a server-side error; retry.
+          for attempt in 1 2 3; do
+            git push -qf "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" data && exit 0
+            sleep 15
+          done
+          exit 1
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
