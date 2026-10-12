@@ -103,6 +103,28 @@ does and the data sources. This file is about how it's built and what bites.
 - GitHub disables scheduled workflows after 60 days without commits; the
   cron-job.org trigger is unaffected.
 
+## Status and open threads (as of 2026-10-12)
+
+- **Consensus forecasts** (`mean2` = KNMI+DWD, `mean3` = all three) are being
+  scored in compare.py's `east` set since 2026-10-12. After a few rainy days,
+  compare them with KNMI alone (compare.json → `east`). If one clearly wins,
+  consider letting it drive the graph/verdict for eastern locations, and/or show
+  source agreement as a "how sure right now" signal.
+- **First head-to-head (3 days, 2026-10-09…12):** KNMI best up to ~30 min (part
+  head start: scored against its own observations); Buienradar too wet (bias
+  ~1.2–1.3) but beats KNMI beyond ~90 min as KNMI's smoothing dries out; DWD
+  (east only) slightly better than KNMI from ~1 h on.
+- **Reliability** is now rain/dry split with dry-by-distance classes (rebuilt
+  2026-10-12). The headline and the reliability line share `turnOf()`. Thresholds
+  (`SCALE`, `DRY_BINS`, "held up" = 0.6 rain) are educated guesses; an offline
+  test on KNMI's archive (forecasts since 2024-08) could tune them.
+- **Touch scrubbing on iOS** was fixed with raw touch events (2026-10-11); the
+  user is monitoring whether it stays fixed.
+- Unanswered: the user asked to offset "sp19 and 43" on the x axis — unclear
+  what that refers to (possibly not this project).
+- GitHub had an Actions incident on 2026-10-12 (push to `data` rejected with
+  "fatal error in commit_refs"); the store step now retries 3×.
+
 ## Conventions
 
 - Commit messages: imperative summary, a short body explaining why.
