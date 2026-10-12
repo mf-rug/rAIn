@@ -50,32 +50,38 @@ const STOPS = [
 
 const $ = (id) => document.getElementById(id);
 
-// ?demo: fake showery rain at the point and fake reliability (good for ~50
-// minutes, then dropping off), to preview how the forecast display looks.
-const DEMO = new URLSearchParams(location.search).has('demo') ? {
-  skill: (() => {
-    const rain = Array.from({ length: 24 }, (_, k) => (k < 6 ? 970 - 30 * k : Math.max(80, 800 - (k - 5) * 50)));
-    const dry = Array.from({ length: 24 }, (_, k) => 999 - 2 * k);
-    const byDist = [[960, 45], [985, 20], [996, 6], [999, 1]].map(([a, d]) => Array.from({ length: 24 }, (_, k) => Math.max(500, a - d * k)));
-    return { hours: 6, cell: 4, tile: 10, nx: 18, ny: 19, rain: Array(18 * 19).fill(rain), dry: Array(18 * 19).fill(dry),
-      nl: { rain, dry, dry_by_distance: byDist, dry_bins: [1, 3, 7] } };
-  })(),
-  rain(m) { // minutes from now → mm/h
-    const bump = (c, w, h) => h * Math.exp(-(((m - c) / w) ** 2));
-    // Showery: short bursts of varying strength every 15–25 minutes.
-    return [[-50, 0.8], [-28, 1.6], [-8, 0.6], [12, 1.4], [30, 2.8], [47, 0.9], [66, 3.2], [84, 1.3], [103, 2.2], [120, 0.9]]
-      .reduce((sum, [c, h]) => sum + bump(c, 4.5, h), 0);
-  },
-  // Distance class for frame i: how close in time the nearest fake shower is
-  // (showers move past, so near in time ≈ near in space).
-  bin(i) {
-    const s = pointSeries();
-    for (let d = 0; d < s.length; d++) {
-      if ((s[i - d] ?? 0) >= 0.3 || (s[i + d] ?? 0) >= 0.3) return d <= 1 ? 0 : d <= 2 ? 1 : d <= 4 ? 2 : 3;
-    }
-    return 3;
-  },
-} : null;
+// ?demo: fake rain and reliability at the point, to preview the forecast display.
+//   ?demo          a long dry stretch, then on-off showers, then dry again
+//   ?demo=showers  showers on and off the whole time
+// Reliability numbers are modelled on real ones (2026-10-12), a bit exaggerated.
+const DEMO = (() => {
+  const q = new URLSearchParams(location.search);
+  if (!q.has('demo')) return null;
+  const showers = q.get('demo') === 'showers'
+    ? [[-50, 0.8], [-28, 1.6], [-8, 0.6], [12, 1.4], [30, 2.8], [47, 0.9], [66, 3.2], [84, 1.3], [103, 2.2], [120, 0.9]]
+    : [[-55, 1.2], [-42, 0.7], [62, 1.6], [80, 3.0], [98, 1.1], [116, 2.2]];
+  const mk = (a, d, min = 0) => Array.from({ length: 24 }, (_, k) => Math.max(min, Math.round(a - d * k)));
+  const rain = mk(950, 38, 80), dry = mk(1000, 0.3);
+  return {
+    skill: {
+      hours: 6, cell: 4, tile: 10, nx: 18, ny: 19, rain: Array(18 * 19).fill(rain), dry: Array(18 * 19).fill(dry),
+      nl: { rain, dry, dry_bins: [1, 3, 7], dry_by_distance: [mk(985, 7, 700), mk(998, 1.6), mk(1000, 0.4), mk(1000, 0)] },
+    },
+    rain(m) { // minutes from now → mm/h
+      return showers.reduce((sum, [c, h]) => sum + h * Math.exp(-(((m - c) / 4) ** 2)), 0);
+    },
+    // Distance class for frame i from how close in time the nearest fake shower
+    // is (showers move past, so near in time ≈ near in space).
+    bin(i) {
+      const s = pointSeries();
+      for (let d = 0; d < s.length; d++) {
+        if ((s[i - d] ?? 0) >= 0.3 || (s[i + d] ?? 0) >= 0.3) return d <= 1 ? 0 : d <= 3 ? 1 : d <= 6 ? 2 : 3;
+      }
+      return 3;
+    },
+  };
+})();
+
 const state = {
   mapSource: 'knmi',     // radar shown on the map: 'knmi' or 'dwd'
   coverage: { knmi: null, dwd: null },
