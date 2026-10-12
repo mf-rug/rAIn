@@ -1203,33 +1203,59 @@ function drawCompare() {
   p.textContent = `Rain correctly forecast 1 hour ahead (${days}): KNMI ${pct(k.csi)} · Buienradar ${pct(b.csi)}.${east}`;
 }
 
+// The reliability line describes the claim the headline makes: dry throughout,
+// rain throughout, or a turn (dry until T / dry from T), each half with its own
+// kind of reliability.
 function drawTrust(series) {
   const r = reliability(state.point);
   const p = $('trust');
-  if (!r) { p.hidden = true; return; }
+  const ahead = series.slice(state.nowIdx);
+  if (!r || !ahead.length || ahead.some((v) => v === null)) { p.hidden = true; return; }
   p.hidden = false;
   const hours = (DEMO?.skill ?? state.skill).hours;
+  const tooLittle = `Too little rain in the last ${hours} hours to judge how reliable forecasts are today.`;
   const where = r.area === 'here' ? '' : ` across ${r.area}`;
-  const rainAhead = series.slice(state.nowIdx).some((v) => v != null && v >= WET);
-  if (rainAhead) {
-    if (!r.rain) { p.textContent = `Too little rain in the last ${hours} hours to judge how reliable rain forecasts are today.`; return; }
+  const vals = (kind, from, to) => {
+    const out = [];
+    for (let i = from; i < to; i++) out.push(trustAt(state.nowIdx + i, kind));
+    return out;
+  };
+  // Level word for the least certain moment of a stretch.
+  const level = (kind, from, to) => {
+    const v = vals(kind, from, to).filter((x) => x != null);
+    return v.length ? trustWord(kind, Math.min(...v)).replace(' reliability', '') : null;
+  };
+  const T = (i) => hhmm(state.frames[state.nowIdx + i].t);
+  const { wetNow, at } = turnOf(ahead);
+  const n = ahead.length;
+
+  if (!wetNow && at < 0) {        // dry throughout
+    const v = vals('dry', 1, n);
+    if (!v.some((x) => x != null)) { p.textContent = tooLittle; return; }
+    const m = horizon(v, SCALE.dry[0]);
+    const near = v.some((x, k) => x != null && x < SCALE.dry[0] && dryBinAt(state.nowIdx + 1 + k) <= 1);
+    const pct = (x) => (x >= 0.9995 ? 'over 99.9%' : `${Math.floor(x * 1000) / 10}%`);
+    p.textContent = m >= (n - 1) * 5 ? `Dry forecasts held up well today, even 2 hours ahead (${pct(Math.min(...v.filter((x) => x != null)))} right).`
+      : m >= 10 ? `Dry for now; ${near ? 'with showers close by, ' : ''}dry forecasts held up well for about ${m} minutes today, less beyond.`
+      : `${near ? 'With showers this close, a' : 'A'} dry forecast has been unreliable today, even 10 minutes ahead.`;
+    return;
+  }
+  if (wetNow && at < 0) {         // rain throughout
+    if (!r.rain) { p.textContent = tooLittle; return; }
     const m = horizon(r.rain, 0.6);
     p.textContent = m >= 120 ? `Rain forecasts${where} held up well for the full 2 hours today.`
       : m >= 10 ? `Rain forecasts${where} held up well for about ${m} minutes today; less reliable beyond.`
       : `Rain forecasts${where} have been unreliable today, even 10 minutes ahead.`;
     return;
   }
-  // Per moment: dry reliability for how close forecast rain is at that moment.
-  const vals = [];
-  for (let i = state.nowIdx + 1; i < series.length; i++) vals.push(trustAt(i, 'dry'));
-  if (!vals.some((v) => v != null)) { p.textContent = `Too little rain in the last ${hours} hours to judge how reliable forecasts are today.`; return; }
-  const m = horizon(vals, SCALE.dry[0]);
-  const near = vals.some((v, k) => v != null && v < SCALE.dry[0] && dryBinAt(state.nowIdx + 1 + k) <= 1);
-  const pct = (v) => `${Math.floor(v * 1000) / 10}%`;
-  const worst = Math.min(...vals.filter((v) => v != null));
-  p.textContent = m >= vals.length * 5 ? `Dry forecasts held up well today, even 2 hours ahead (${pct(worst)} right).`
-    : m >= 10 ? `Dry for now; ${near ? 'with showers close by, ' : ''}dry forecasts held up well for about ${m} minutes today, less beyond.`
-    : `${near ? 'With showers this close, a' : 'A'} dry forecast has been unreliable today, even 10 minutes ahead.`;
+  // A turn: each half with its own reliability. The last 10 minutes before the
+  // turn are left out of the first half: whether it turns at T or a bit
+  // earlier is what the second half (the turn's timing) already covers.
+  const first = wetNow ? 'rain' : 'dry', then = wetNow ? 'dry' : 'rain';
+  const a = level(first, 1, Math.max(2, at - 2)), b = level(then, at, Math.min(n, at + 3));
+  if (!a && !b) { p.textContent = tooLittle; return; }
+  const part = (kind, word, rel) => `${kind} ${rel} ${T(at)} ${word ?? 'unknown'}`;
+  p.textContent = `Reliability: ${part(first, a, 'until')} · ${part(then, b, 'from')}.`;
 }
 
 // ---------- graph & verdict ----------
@@ -1442,6 +1468,21 @@ function drawVerdict(series) {
   verdictFor(ahead);
 }
 
+// The forecast's main turn, shared by the verdict and the reliability line.
+// Raining now: the frame (from now) where it turns dry, -1 if not within the
+// forecast. Dry now: where rain starts (lone drizzle blips ignored), or -1.
+function turnOf(ahead) {
+  const wet = (v) => v >= WET;
+  // Rain stops when the next 10 minutes are dry.
+  const dryFrom = (from) => {
+    for (let i = from; i < ahead.length; i++) if (!wet(ahead[i]) && !wet(ahead[i + 1] ?? 0)) return i;
+    return -1;
+  };
+  if (wet(ahead[0])) return { wetNow: true, at: dryFrom(1), dryFrom };
+  // Ignore lone 5-minute drizzle blips; they're mostly radar noise.
+  return { wetNow: false, at: ahead.findIndex((v, i) => wet(v) && (v >= 0.5 || wet(ahead[i + 1] ?? 0))), dryFrom };
+}
+
 function verdictFor(ahead) {
   const t = (i) => `<span class="t">${hhmm(state.frames[state.nowIdx + i].t)}</span>`;
   if (!state.point || !ahead.length || ahead.some((v) => v === null)) {
@@ -1451,22 +1492,16 @@ function verdictFor(ahead) {
   }
   const until = ahead.length - 1;
   const endTime = hhmm(state.frames[state.frames.length - 1].t);
-  const wet = (v) => v >= WET;
-  // Rain stops when the next 10 minutes are dry.
-  const dryFrom = (from) => {
-    for (let i = from; i < ahead.length; i++) if (!wet(ahead[i]) && !wet(ahead[i + 1] ?? 0)) return i;
-    return -1;
-  };
+  const { wetNow, at, dryFrom } = turnOf(ahead);
 
-  if (wet(ahead[0])) {
-    const j = dryFrom(1);
+  if (wetNow) {
+    const j = at;
     const peak = Math.max(...ahead.slice(0, j < 0 ? undefined : j));
     $('verdict').innerHTML = j < 0 ? `Rain until at least ${t(until)}` : `Dry from ${t(j)}`;
     $('detail').textContent = `${cap(intensity(ahead[0]))} rain now, up to ${peak.toFixed(1)}\u00a0mm/h.`;
     return;
   }
-  // Ignore lone 5-minute drizzle blips; they're mostly radar noise.
-  const s = ahead.findIndex((v, i) => wet(v) && (v >= 0.5 || wet(ahead[i + 1] ?? 0)));
+  const s = at;
   if (s < 0) {
     $('verdict').textContent = 'Dry for the next 2 hours';
     $('detail').textContent = `No rain expected here until at least ${endTime}.`;
