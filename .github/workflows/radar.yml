@@ -74,7 +74,7 @@ jobs:
         run: |
           mkdir site
           git archive HEAD | tar -x -C site
-          rm -rf site/job site/.github site/.gitignore
+          rm -rf site/job site/.github site/.gitignore site/README.md site/CLAUDE.md site/icon-source.svg
           mkdir site/data
           cp out/index.json out/skill.json out/coverage.json out/compare.json out/*.png site/data/ 2>/dev/null || true
 
