@@ -18,7 +18,9 @@ in proportion.
 
 DWD's nowcast is scored too, but it only covers the eastern part of the
 Netherlands, so it gets its own set ("east"): KNMI, Buienradar and DWD on the
-places where all three made a forecast.
+places where all three made a forecast. Two consensus forecasts are scored in
+the same set: the mean of KNMI and DWD ("mean2") and of all three ("mean3"),
+to see whether combining sources beats each of them.
 
 State in OUT/state/compare.json; summary for the app in OUT/compare.json.
 """
@@ -122,7 +124,9 @@ class Compare:
         tk = key(t)
         blank = lambda: [[0] * 6 for _ in range(LEADS + 1)]  # noqa: E731
         day = self.days.setdefault(t.strftime("%Y-%m-%d"), {"br": blank(), "knmi": blank()})
-        east = day.setdefault("east", {"knmi": blank(), "br": blank(), "dwd": blank()})
+        east = day.setdefault("east", {})
+        for src in ("knmi", "br", "dwd", "mean2", "mean3"):
+            east.setdefault(src, blank())
 
         def tally(row, f, o):
             fw, ow = f >= WET_MMH, o >= WET_MMH
@@ -159,6 +163,8 @@ class Compare:
                     tally(east["knmi"][k], kn[p], obs[p])
                     tally(east["br"][k], b[p], obs[p])
                     tally(east["dwd"][k], d[p], obs[p])
+                    tally(east["mean2"][k], (kn[p] + d[p]) / 2, obs[p])
+                    tally(east["mean3"][k], (kn[p] + b[p] + d[p]) / 3, obs[p])
 
     def save(self, t0):
         old = key(t0 - timedelta(hours=2, minutes=10))
@@ -194,6 +200,6 @@ class Compare:
         for src in ("knmi", "br"):
             summary[src] = rows_for(lambda v: v[src])
         blank = [[0] * 6 for _ in range(LEADS + 1)]
-        for src in ("knmi", "br", "dwd"):
+        for src in ("knmi", "br", "dwd", "mean2", "mean3"):
             summary["east"][src] = rows_for(lambda v: v.get("east", {}).get(src, blank))
         (self.out / "compare.json").write_text(json.dumps(summary, separators=(",", ":")))
