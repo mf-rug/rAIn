@@ -56,9 +56,17 @@ SAT_BUDGET = 60                  # seconds per run for satellite requests
 # on 2026-10-13: drifting the newest image along the mean of the last two
 # fields beat a frozen image at 10–60 minutes (wrong cloud/clear pixels at
 # 60 min: 11.5% vs 16.9%).
+# A uniform cloud deck gives the flow nothing to follow: only its edges moved,
+# its interior stood still, and drifted fronts got squashed along the wind.
+# So local contrast is enhanced first (CLAHE: the deck's faint texture becomes
+# trackable), and blocks with little texture take the motion of textured ones
+# around them (FLOW_FILL blocks). Speed variation inside clouds 1.02 → 0.38;
+# wrong pixels at 90 min 14.0% → 11.4% (frozen: 21.6%).
 FLOW_GRID = 32
 FLOW_CAP_KM = 30                 # Mercator km per 10 minutes (~110 km/h on the ground here)
 FLOW_SCALE = 4                   # PNG byte steps per pixel (128 = no motion)
+FLOW_FILL = 6                    # blocks (Gaussian sigma) for filling textureless blocks
+FLOW_VERSION = 2                 # in the file names: a change recomputes all fields
 
 STN = "10-minute-in-situ-meteorological-observations/versions/1.0"
 STN_STEP = timedelta(minutes=10)
@@ -172,17 +180,28 @@ def tier_geometry():
 
 def flow_field(pa, pb, minutes, km_per_px):
     """Cloud motion from image a to image b as a grid of (dx, dy) in pixels per 10 min."""
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+
     def grey(p, s):
         im = Image.open(p).convert("L")
-        return np.asarray(im.resize((im.width // s, im.height // s), Image.BILINEAR))
+        return clahe.apply(np.asarray(im.resize((im.width // s, im.height // s), Image.BILINEAR)))
     s = 2 if km_per_px < 2 else 1          # the detailed tier is fine enough at half size
-    f = cv2.calcOpticalFlowFarneback(grey(pa, s), grey(pb, s), None, 0.5, 4, 21, 3, 7, 1.5, 0) * s * 10 / minutes
+    a = grey(pa, s)
+    f = cv2.calcOpticalFlowFarneback(a, grey(pb, s), None, 0.5, 4, 21, 3, 7, 1.5, 0) * s * 10 / minutes
+    af = a.astype(np.float32)
+    texture = np.hypot(cv2.Sobel(af, cv2.CV_32F, 1, 0, ksize=5), cv2.Sobel(af, cv2.CV_32F, 0, 1, ksize=5))
     h, w = f.shape[:2]
     g = np.zeros((FLOW_GRID, FLOW_GRID, 2), np.float32)
+    conf = np.zeros((FLOW_GRID, FLOW_GRID), np.float32)
     for j in range(FLOW_GRID):
         for i in range(FLOW_GRID):
-            blk = f[j * h // FLOW_GRID:(j + 1) * h // FLOW_GRID, i * w // FLOW_GRID:(i + 1) * w // FLOW_GRID]
-            g[j, i] = np.median(blk.reshape(-1, 2), axis=0)
+            sl = (slice(j * h // FLOW_GRID, (j + 1) * h // FLOW_GRID), slice(i * w // FLOW_GRID, (i + 1) * w // FLOW_GRID))
+            g[j, i] = np.median(f[sl].reshape(-1, 2), axis=0)
+            conf[j, i] = texture[sl].mean()
+    conf = np.clip(conf / max(np.percentile(conf, 75), 1e-6), 0, 1)
+    num = np.stack([cv2.GaussianBlur(g[..., c] * conf, (0, 0), FLOW_FILL) for c in range(2)], -1)
+    around = num / np.maximum(cv2.GaussianBlur(conf, (0, 0), FLOW_FILL), 1e-6)[..., None]
+    g = conf[..., None] * g + (1 - conf[..., None]) * around
     g = np.stack([cv2.medianBlur(np.ascontiguousarray(g[..., c]), 3) for c in range(2)], -1)
     cap = FLOW_CAP_KM / km_per_px
     speed = np.hypot(g[..., 0], g[..., 1])
@@ -214,8 +233,8 @@ def sat_motion(out, entries):
             minutes = (parse(b["t"]) - parse(a["t"])).total_seconds() / 60
             if not a.get(key) or not b.get(key) or minutes > 30:
                 continue
-            name = f"sat-flow-{key}-{a['t'][:16].replace('-', '').replace(':', '').replace('T', '')}.png"
-            if not (a.get("flow") or {}).get(key) or not (out / a["flow"][key]).exists():
+            name = f"sat-flow{FLOW_VERSION}-{key}-{a['t'][:16].replace('-', '').replace(':', '').replace('T', '')}.png"
+            if (a.get("flow") or {}).get(key) != name or not (out / name).exists():
                 try:
                     save_flow(flow_field(out / a[key], out / b[key], minutes, km), out / name)
                 except Exception as ex:
@@ -224,7 +243,7 @@ def sat_motion(out, entries):
                 a.setdefault("flow", {})[key] = name
             fields.append(a["flow"][key])
         if fields:
-            name = f"sat-motion-{key}-{real[-1]['t'][:16].replace('-', '').replace(':', '').replace('T', '')}.png"
+            name = f"sat-motion{FLOW_VERSION}-{key}-{real[-1]['t'][:16].replace('-', '').replace(':', '').replace('T', '')}.png"
             if not (out / name).exists():
                 save_flow(np.mean([load_flow(out / f) for f in fields[-2:]], axis=0), out / name)
             motion[key] = name

@@ -95,7 +95,11 @@ does and the data sources. This file is about how it's built and what bites.
   one) and `sat-motion-{tier}-{t}.png` (mean of the last two, for drifting
   the newest image forward; `index.json` → `sat_motion`): 32×32 RGBA, R/G =
   128 + 4 × pixels per 10 min. The app warps between images and traces the
-  drift back in 10-minute steps (a straight jump smears). Throttled at 20
+  drift back in 10-minute steps (a straight jump smears). A uniform cloud
+  deck has no texture for optical flow: only its edges moved and drifted
+  fronts got squashed along the wind. Hence CLAHE before the flow and
+  texture-weighted filling (`FLOW_FILL`); bump `FLOW_VERSION` when the method
+  changes so all fields are recomputed (file names carry it). Throttled at 20
   requests/min, which is why the job fetches, not the app.
 - **Weather models' sun at a point was poor on the first check** (2026-10-13:
   HARMONIE missed a sunny afternoon in the south, correlation ~0 with the
