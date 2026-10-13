@@ -647,7 +647,12 @@ function drawCoverage(ring) {
   const world = [[-85, -180], [-85, 180], [85, 180], [85, -180]];
   coverageLayers = [
     L.polygon([world, ...rings], { pane: 'veil', stroke: false, fillColor: 'url(#nodata-hatch)', fillOpacity: 1, interactive: false }),
-    L.polygon(rings, { pane: 'veil', fill: false, color: css.getPropertyValue('--muted').trim(), weight: 1, opacity: 0.6, dashArray: '4 3', interactive: false }),
+    // Over clouds the edge needs a light halo under a darker line to stand out.
+    ...(sat.on ? [L.polygon(rings, { pane: 'veil', fill: false, color: '#fff', weight: 4, opacity: 0.8, interactive: false })] : []),
+    L.polygon(rings, {
+      pane: 'veil', fill: false, color: sat.on ? css.getPropertyValue('--ink').trim() : css.getPropertyValue('--muted').trim(),
+      weight: sat.on ? 1.6 : 1, opacity: sat.on ? 0.9 : 0.6, dashArray: '4 3', interactive: false,
+    }),
   ];
   coverageLayers.forEach((l) => l.addTo(map));
   // The hatch pattern has to live in the same SVG as the polygon.
