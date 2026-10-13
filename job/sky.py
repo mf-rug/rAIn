@@ -90,6 +90,8 @@ def satellite(out, old, oldest):
     with no image of its own comes back as a copy of its neighbour: such
     copies are kept as gaps (and not requested again)."""
     have = {e["t"]: e for e in old if e["t"] >= iso(oldest) and (e.get("gap") or (out / e["file"]).exists())}
+    real = [t for t, e in have.items() if not e.get("gap")]
+    have = {t: e for t, e in have.items() if not e.get("gap") or (real and t < max(real))}
     try:
         t = floor(sat_latest(), SAT_STEP)
     except Exception as e:
@@ -112,16 +114,20 @@ def satellite(out, old, oldest):
             except Exception as e:   # retried next run
                 print("satellite failed", iso(t), getattr(e, "code", e))
         t -= SAT_STEP
-    # Copies of a neighbour: keep the earlier one.
+    # Copies of a neighbour: keep the earlier one. A copy at the newest end is
+    # dropped and asked for again next run (the capabilities can list a time
+    # before its image is served).
     entries = sorted(have.values(), key=lambda e: e["t"])
     prev = None
-    for e in entries:
+    for k, e in enumerate(entries):
         if e.get("gap"):
             continue
         body = (out / e["file"]).read_bytes()
         if prev is not None and body == prev:
             (out / e.pop("file")).unlink()
             e["gap"] = True
+            if all(x.get("gap") for x in entries[k:]):
+                return [x for x in entries[:k]]
         prev = body
     return entries
 
