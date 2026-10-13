@@ -233,6 +233,47 @@ IR_CLEAR, IR_CLOUD = 52, 70      # grey levels of the service's IR rendering (20
 BG_SIGMA = 12                    # px, at the image's half size
 
 
+def smooth_fill(img, clear):
+    """Clear surroundings blurred into cloudy areas: normalised convolution at
+    growing scales, then the median clear colour. Smooth, no hard edges."""
+    out = np.zeros_like(img)
+    have = np.zeros(clear.shape, np.float32)
+    for sigma in (BG_SIGMA, BG_SIGMA * 3, BG_SIGMA * 9):
+        num = cv2.GaussianBlur(img * clear[..., None], (0, 0), sigma)
+        den = cv2.GaussianBlur(clear, (0, 0), sigma)
+        est = num / np.maximum(den, 1e-6)[..., None]
+        wgt = np.clip(den / 0.2, 0, 1) * (1 - have)      # fill what coarser scales haven't
+        out += est * wgt[..., None]
+        have += wgt
+    typical = np.median(img[clear > 0.8], axis=0) if (clear > 0.8).sum() > 100 else np.array([30, 33, 40], np.float32)
+    return out + typical * (1 - have)[..., None]
+
+
+def clear_view(out, key, img, cloud, night):
+    """The tier's ground as last seen clear, by day and by night (state, half
+    size): updated where this image is clear. → (picture, how much of it is
+    known 0..1) for this image's mix of day and night."""
+    path = out / "state" / f"clear-{key}.npz"
+    h, w = cloud.shape
+    if path.exists():
+        z = np.load(path)
+        day, nig, kd, kn = z["day"].astype(np.float32), z["night"].astype(np.float32), z["kd"].astype(np.float32), z["kn"].astype(np.float32)
+        if day.shape[:2] != (h, w):
+            day = None
+    if not path.exists() or day is None:
+        day, nig = np.zeros((h, w, 3), np.float32), np.zeros((h, w, 3), np.float32)
+        kd, kn = np.zeros((h, w), np.float32), np.zeros((h, w), np.float32)
+    n = night[..., 0]
+    upd = (cloud < 0.15).astype(np.float32)
+    for pic, k, wgt in ((day, kd, upd * (n < 0.5)), (nig, kn, upd * (n >= 0.5))):
+        pic[:] = pic * (1 - wgt[..., None]) + img * wgt[..., None]
+        k[:] = np.maximum(k, wgt)
+    np.savez_compressed(path, day=day.astype(np.uint8), night=nig.astype(np.uint8), kd=(kd > 0.5), kn=(kn > 0.5))
+    seen = day * (1 - night) + nig * night
+    known = (kd * (1 - n) + kn * n)[..., None]
+    return seen, known
+
+
 def drift_layers(out, e, key, bbox, w, h):
     """→ {"cloud", "alpha", "bg"} file names for image e of a tier (made once)."""
     t = parse(e["t"])
@@ -265,12 +306,15 @@ def drift_layers(out, e, key, bbox, w, h):
     v = np.clip((ir - IR_CLEAR) / (130 - IR_CLEAR), 0, 1)[..., None]
     ir_rgb = np.array([30, 33, 40], np.float32) + v * np.array([105, 110, 120], np.float32)   # GeoColour's faint night clouds
     no_lights = img * (1 - night) + ir_rgb * night
-    # Background: clear parts as they are; under clouds the clear surroundings, blurred.
+    # Background: clear parts as they are (with their city lights); under
+    # clouds the ground as last seen clear (day and night kept apart), else a
+    # smooth blur of the clear surroundings, else a typical ground colour.
+    # Never the cloud itself: that showed as old clouds left behind.
     clear = (1 - cloud)[..., None]
-    num = cv2.GaussianBlur(no_lights * clear, (0, 0), BG_SIGMA)
-    den = cv2.GaussianBlur(np.ascontiguousarray(clear[..., 0]), (0, 0), BG_SIGMA)[..., None]
-    under = np.where(den > 0.15, num / np.maximum(den, 1e-3), no_lights)
-    bg = img * clear + under * (1 - clear)             # clear parts keep their city lights
+    seen, known = clear_view(out, key, img, cloud, night)
+    under = smooth_fill(img, clear[..., 0])
+    under = seen * known + under * (1 - known)
+    bg = img * clear + under * (1 - clear)
     full = (w, h)
     Image.fromarray(np.clip(no_lights, 0, 255).astype(np.uint8)).resize(full, Image.BILINEAR).save(out / names["cloud"], quality=75)
     Image.fromarray((cloud * 255).astype(np.uint8), "L").save(out / names["alpha"], quality=85)

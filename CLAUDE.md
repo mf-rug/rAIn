@@ -108,7 +108,11 @@ does and the data sources. This file is about how it's built and what bites.
   Cloud mask from infrared (`mtg_fd:ir105_hrfi`, grey 52→70); night clouds
   coloured from infrared; GeoColour turns to its night look well before
   sunset (dark at 2–8° sun height), hence night = sun below 6–14°. The app
-  blends from the plain drift to the split one over the first 20 minutes. Throttled at 20
+  blends from the plain drift to the split one over the first 20 minutes.
+  The background under clouds is never cloud (that showed as old clouds left
+  behind): the ground as last seen clear (`state/clear-{tier}.npz`, day and
+  night apart), else a multi-scale smooth fill. Low warm clouds (GeoColour's
+  light blue at night) escape the IR mask and stay put. Throttled at 20
   requests/min, which is why the job fetches, not the app.
 - **Weather models' sun at a point was poor on the first check** (2026-10-13:
   HARMONIE missed a sunny afternoon in the south, correlation ~0 with the
