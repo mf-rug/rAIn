@@ -285,6 +285,39 @@ html, body {
 .layer[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
 .layer[hidden] { display: none; }
 #clouds-time { font-weight: 400; font-variant-numeric: tabular-nums; }
+
+/* Measured, now or forecast: what the map shows at the timeline position. */
+.mode {
+  position: absolute;
+  z-index: 500;
+  left: 12px;
+  top: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--paper);
+  color: var(--ink);
+  font: 700 13px var(--body);
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+.mode[hidden] { display: none; }
+.mode::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+.mode.now::before { background: var(--now); }
+.mode.ahead::before { background: var(--rain); }
+.mode .t { font-weight: 400; }
+
+/* Phones: the map's buttons at about two thirds of their size. */
+@media (max-width: 859px) {
+  .source button, .layer, .mode { padding: 3px 8px; font-size: 10.5px; }
+  .mode { gap: 4px; top: 10px; left: 10px; }
+  .mode::before { width: 5px; height: 5px; }
+  .source { left: 10px; bottom: 10px; }
+  .layer { left: 10px; bottom: 36px; }
+}
 /* Daytime satellite images are bright; tone them down on the dark theme. */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) .leaflet-sat-pane { filter: brightness(0.72); }

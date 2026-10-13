@@ -494,11 +494,22 @@ function drawRadar() {
   gpu.canvas.style.opacity = n == null ? 1 : trustOpacity(n, 0.35);
 }
 
+// The map's corner label: measured (past), now, or forecast, with the time.
+function drawMode() {
+  const el = $('mode'), fr = state.frames;
+  el.hidden = !fr.length;
+  if (!fr.length) return;
+  const d = state.pos - state.nowIdx;
+  const kind = Math.abs(d) < 0.01 ? 'now' : d < 0 ? 'past' : 'ahead';
+  el.className = `mode ${kind}`;
+  el.innerHTML = `${{ now: 'Now', past: 'Measured', ahead: 'Forecast' }[kind]} <span class="t">${hhmm(fr[0].t + state.pos * STEP)}</span>`;
+}
+
 let drawQueued = false;
 function requestDraw() {
   if (drawQueued) return;
   drawQueued = true;
-  requestAnimationFrame(() => { drawQueued = false; drawRadar(); render(); });
+  requestAnimationFrame(() => { drawQueued = false; drawRadar(); drawMode(); render(); });
 }
 
 // ---------- map ----------
