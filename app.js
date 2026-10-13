@@ -1122,8 +1122,12 @@ function makeSatRenderer() {
         if (layered) {
           // Only the clouds move; the ground stays. Blended in over the first
           // 20 minutes, so the newest image doesn't jump.
-          float ca = (q.x < 0.0 || q.y < 0.0 || q.x > 1.0 || q.y > 1.0) ? 0.0 : texture2D(mask, q).r;
-          vec4 split = vec4(mix(texture2D(ground, uv).rgb, texture2D(cloud, q).rgb, ca), 1.0);
+          // Traced back out of this image: transparent, the coarser tier
+          // underneath knows what arrives there.
+          // Near the edge it fades out over 4% of the image, so the coarser
+          // tier takes over without a visible line.
+          float edge = smoothstep(0.0, 0.04, min(min(q.x, q.y), min(1.0 - q.x, 1.0 - q.y)));
+          vec4 split = edge <= 0.0 ? vec4(0.0) : vec4(mix(texture2D(ground, uv).rgb, texture2D(cloud, q).rgb, texture2D(mask, q).r), 1.0) * edge;
           c = mix(c, split, clamp(k / 2.0, 0.0, 1.0));
         }
       }
@@ -1173,12 +1177,13 @@ function makeSatRenderer() {
   };
 }
 
-// Tiers the view needs: a coarser one only where the view reaches beyond the
-// finer one, so phones zoomed in on the Netherlands load just the detailed
+// Tiers the view needs: a coarser one only where the view (with a margin)
+// reaches beyond the finer one, so phones zoomed in on the Netherlands load just the detailed
 // images. All of the hour's images of those tiers are loaded at once.
 function loadSat() {
   if (!sat.on) return;
-  const view = map.getBounds();
+  // With margin: drifted clouds near a finer image's edge come from beyond it.
+  const view = map.getBounds().pad(1);
   sat.tiers.forEach((tier, k) => {
     if (k > 0 && sat.tiers[k - 1].bounds.contains(view)) return;
     if (!tier.r) {
