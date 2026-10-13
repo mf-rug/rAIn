@@ -40,10 +40,14 @@ SAT_WMS = "https://view.eumetsat.int/geoserver/wms"
 SAT_LAYER = "mtg_fd:rgb_geocolour"
 SAT_STEP = timedelta(minutes=10)
 SAT_W, SAT_H = 1000, 1072        # the radar grid's area (≈1.2 Mercator km per pixel)
-# A coarser image of the wider area (≈10°W–25°E, 41–60°N, ≈3.7 Mercator km per
-# pixel) under the detailed one, for the map zoomed out.
-WIDE = (-1113195, 5012341, 2782987, 8399738)
-WIDE_W, WIDE_H = 1040, 905
+# Coarser images of wider areas under the detailed one, for the map zoomed
+# out (the app loads them only when the view reaches beyond the finer one):
+# key in the index entries → (Mercator bbox, width, height). Re-encoded, as
+# the service's JPEGs are large for a phone.
+TIERS = {
+    "wide": ((-1113195, 5012341, 2782987, 8399738), 1040, 905),   # ≈10°W–25°E, 41–60°N, 3.7 km/px
+    "outer": ((-2782987, 4028802, 4452780, 9876846), 1000, 808),  # ≈25°W–40°E, 34–66°N, 7.2 km/px
+}
 SAT_BUDGET = 60                  # seconds per run for satellite requests
 
 STN = "10-minute-in-situ-meteorological-observations/versions/1.0"
@@ -100,7 +104,7 @@ def sat_image(t, bbox, w, h):
 
 def satellite(out, old, oldest):
     """Satellite images from oldest to the newest out, one per 10 minutes.
-    Returns [{"t", "file"}]; entries with "gap" mark times without an image.
+    Returns [{"t", "file", "wide", "outer"}]; entries with "gap" mark times without an image.
 
     The service answers any time with the nearest image it has, so a time
     with no image of its own comes back as a copy of its neighbour: such
@@ -122,11 +126,11 @@ def satellite(out, old, oldest):
                 (out / name).write_bytes(sat_image(t, (X0, Y0, X1, Y1), SAT_W, SAT_H))
                 e = have[iso(t)] = {"t": iso(t), "file": name}
                 print("satellite", iso(t))
-            if "file" in e and not (e.get("wide") and (out / e["wide"]).exists()):
-                name = f"sat-wide-{t:%Y%m%d%H%M}.jpg"
-                # Recompressed: the service's JPEGs are large for a phone.
-                Image.open(io.BytesIO(sat_image(t, WIDE, WIDE_W, WIDE_H))).save(out / name, quality=65, optimize=True)
-                e["wide"] = name
+            for key, (bbox, w, h) in TIERS.items():
+                if "file" in e and not (e.get(key) and (out / e[key]).exists()):
+                    name = f"sat-{key}-{t:%Y%m%d%H%M}.jpg"
+                    Image.open(io.BytesIO(sat_image(t, bbox, w, h))).save(out / name, quality=65, optimize=True)
+                    e[key] = name
         except Exception as ex:   # retried next run
             print("satellite failed", iso(t), getattr(ex, "code", ex))
         t -= SAT_STEP
@@ -141,8 +145,9 @@ def satellite(out, old, oldest):
         body = (out / e["file"]).read_bytes()
         if prev is not None and body == prev:
             (out / e.pop("file")).unlink()
-            if e.get("wide"):
-                (out / e.pop("wide")).unlink(missing_ok=True)
+            for key in TIERS:
+                if e.get(key):
+                    (out / e.pop(key)).unlink(missing_ok=True)
             e["gap"] = True
             if all(x.get("gap") for x in entries[k:]):
                 return [x for x in entries[:k]]

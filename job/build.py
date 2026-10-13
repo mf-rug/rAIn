@@ -330,7 +330,7 @@ def main():
         index["dwd"] = dwd_meta
     if sat:
         index["sat"] = sat
-        index["sat_wide"] = list(sky.WIDE)
+        index["sat_tiers"] = {k: list(bbox) for k, (bbox, _, _) in sky.TIERS.items()}
     (OUT / "index.json").write_text(json.dumps(index, separators=(",", ":")))
 
     # KNMI vs Buienradar (vs DWD): store the forecasts as they stand now, then
@@ -354,7 +354,7 @@ def main():
     if dwd_meta:
         keep |= {dwd_meta["fc"]} | {e["file"] for e in dwd_meta["obs"]}
         keep |= set(dwd_meta.get("map", {}).get("fc", [])) | {e["file"] for e in dwd_meta.get("map", {}).get("obs", [])}
-    keep |= {e[k] for e in sat for k in ("file", "wide") if k in e}
+    keep |= {e[k] for e in sat for k in ("file", *sky.TIERS) if k in e}
     for p in [*OUT.glob("*.png"), *OUT.glob("*.jpg")]:
         if p.name not in keep:
             p.unlink()

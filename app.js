@@ -911,32 +911,43 @@ for (const b of document.querySelectorAll('.source button')) {
 map.createPane('sat');
 map.getPane('sat').style.zIndex = 300;   // over the basemap, under the veil and the radar
 map.getPane('sat').style.pointerEvents = 'none';
-const sat = { list: [], overlays: new Map(), on: false };
+const sat = { list: [], tiers: [{ key: 'file', bounds: BOUNDS }], overlays: new Map(), on: false };
 
-function syncSat(list, wide) {
-  // Each time: a detailed image of the radar's area over a coarser, wider one.
-  if (wide) sat.wide = L.latLngBounds(L.CRS.EPSG3857.unproject(L.point(wide[0], wide[1])), L.CRS.EPSG3857.unproject(L.point(wide[2], wide[3])));
+// Each time has a detailed image of the radar's area and coarser ones of wider
+// areas ("tiers", finest first), each drawn under the finer one.
+function syncSat(list, tiers) {
+  const merc = (b) => L.latLngBounds(L.CRS.EPSG3857.unproject(L.point(b[0], b[1])), L.CRS.EPSG3857.unproject(L.point(b[2], b[3])));
+  sat.tiers = [{ key: 'file', bounds: BOUNDS }, ...Object.entries(tiers ?? {}).map(([key, b]) => ({ key, bounds: merc(b) }))];
   sat.list = (list ?? []).filter((e) => e.file).map((e) => ({
-    t: Date.parse(e.t), url: DATA + e.file, wide: e.wide && sat.wide ? DATA + e.wide : null,
+    t: Date.parse(e.t), urls: sat.tiers.map((tier) => (e[tier.key] ? DATA + e[tier.key] : null)),
   }));
   $('clouds').hidden = !sat.list.length;
-  const keep = new Set(sat.list.flatMap((e) => [e.url, e.wide]));
+  const keep = new Set(sat.list.flatMap((e) => e.urls));
   for (const [url, o] of sat.overlays) {
     if (!keep.has(url)) { o.remove(); sat.overlays.delete(url); }
   }
-  if (sat.on) for (const e of sat.list) satOverlay(e);
+  loadSat();
   requestDraw();
 }
 
-// All of the hour's images are added at once (invisible), so they're loaded
-// by the time the timeline reaches them.
-function satOverlay(e) {
-  for (const [url, bounds] of [[e.url, BOUNDS], [e.wide, sat.wide]]) {
-    if (url && !sat.overlays.has(url)) {
-      sat.overlays.set(url, L.imageOverlay(url, bounds, { pane: 'sat', opacity: 0, interactive: false }).addTo(map));
+// Tiers the view needs: a coarser one only where the view reaches beyond the
+// finer one, so phones zoomed in on the Netherlands load just the detailed
+// images. All of the hour's images of those tiers are added at once
+// (invisible), so they're loaded by the time the timeline reaches them.
+function loadSat() {
+  if (!sat.on) return;
+  const view = map.getBounds();
+  sat.tiers.forEach((tier, k) => {
+    if (k > 0 && sat.tiers[k - 1].bounds.contains(view)) return;
+    for (const e of sat.list) {
+      const url = e.urls[k];
+      if (url && !sat.overlays.has(url)) {
+        sat.overlays.set(url, L.imageOverlay(url, tier.bounds, { pane: 'sat', opacity: 0, interactive: false }).addTo(map));
+      }
     }
-  }
+  });
 }
+map.on('moveend', () => { if (sat.on) { loadSat(); requestDraw(); } });
 
 // The image for the timeline position, cross-faded into the next one. After
 // the newest image (always, for the forecast) it stays on the newest.
@@ -951,8 +962,14 @@ function drawSat() {
   const i = Math.max(0, l.findLastIndex((e) => e.t <= t));
   const a = l[i], b = l[i + 1];
   const f = b && t > a.t ? Math.min(1, (t - a.t) / (b.t - a.t)) : 0;
-  // Wide images under detailed ones; the next one fading in over the current.
-  const z = new Map([[a.wide, [1, 1]], [b?.wide, [2, f]], [a.url, [3, 1]], [b?.url, [4, f]]]);
+  // Coarser tiers under finer ones; the next image fading in over the current.
+  const n = sat.tiers.length, z = new Map();
+  for (let k = 0; k < n; k++) {
+    // A tier missing at this time (failed fetch, retried by the job) shows its latest earlier image.
+    const own = l.slice(0, i + 1).findLast((e) => e.urls[k]) ?? l.find((e) => e.urls[k]);
+    if (own) z.set(own.urls[k], [(n - 1 - k) * 2 + 1, 1]);
+    if (b?.urls[k]) z.set(b.urls[k], [(n - 1 - k) * 2 + 2, f]);
+  }
   for (const [url, o] of sat.overlays) {
     const [zi, op] = z.get(url) ?? [0, 0];
     o.setOpacity(op);
@@ -965,7 +982,7 @@ function setClouds(on) {
   sat.on = on;
   store.set('clouds', on);
   $('clouds').setAttribute('aria-pressed', String(on));
-  if (on) for (const e of sat.list) satOverlay(e);
+  loadSat();
   homeName = null;
   homeLayers.forEach((l) => l.remove());
   homeLayers = [];
@@ -1074,7 +1091,7 @@ async function fetchPlan() {
         .then((r) => (r.ok ? r.json() : null)).catch(() => null);
       const [skill, coverage, compare, sun] = await Promise.all(['skill.json', 'coverage.json', 'compare.json', 'sun.json'].map(extra));
       const dwd = idx.dwd?.fc ? { ...idx.dwd, base: DATA } : null;
-      return { t0, ref: Date.parse(idx.ref), data: [...entries(idx.obs, 'obs'), ...entries(idx.fc, 'fc')], skill, coverage, compare, dwd, sun, sat: idx.sat ?? [], satWide: idx.sat_wide ?? null };
+      return { t0, ref: Date.parse(idx.ref), data: [...entries(idx.obs, 'obs'), ...entries(idx.fc, 'fc')], skill, coverage, compare, dwd, sun, sat: idx.sat ?? [], satTiers: idx.sat_tiers ?? null };
     }
     console.warn('job output is stale; using KNMI directly');
   } catch (e) {
@@ -1114,7 +1131,7 @@ async function update() {
   state.skill = plan.skill ?? null;
   state.compare = plan.compare ?? null;
   state.sun = plan.sun ?? null;
-  syncSat(plan.sat, plan.satWide);
+  syncSat(plan.sat, plan.satTiers);
   loadDwd(plan.dwd);
   if (plan.coverage) store.set('coverage', plan.coverage);
   state.coverage.knmi = plan.coverage ?? store.get('coverage');

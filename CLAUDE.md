@@ -76,9 +76,11 @@ does and the data sources. This file is about how it's built and what bites.
 - **EUMETSAT's WMS snaps any time to the nearest image** (`nearestValue="1"`,
   no warning header) and returns an old default without a time. The newest
   real time comes from the layer's own capabilities document; images arrive
-  ~25–45 min late; copies of a neighbour are kept as gaps. Two images per
-  time: the radar area in detail and a coarse wide one (`sat-wide-*`, bbox in
-  `index.json` → `sat_wide`) under it. Throttled at 20
+  ~25–45 min late; copies of a neighbour are kept as gaps. Per time: the
+  radar area in detail plus coarser tiers of wider areas (`sky.TIERS`:
+  `sat-wide-*` to ~10°W–25°E, `sat-outer-*` to ~25°W–40°E; bboxes in
+  `index.json` → `sat_tiers`). The app loads a tier only when the map view
+  reaches beyond the finer one. Throttled at 20
   requests/min, which is why the job fetches, not the app.
 - **Weather models' sun at a point was poor on the first check** (2026-10-13:
   HARMONIE missed a sunny afternoon in the south, correlation ~0 with the
