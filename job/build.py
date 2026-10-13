@@ -310,24 +310,21 @@ def main():
     except Exception as e:
         print("dwd unavailable:", e)
 
-    # The sky between the rain (job/sky.py): satellite images for the map's
-    # past hour, stations' measured sunshine, and scores of models' sun
+    # The sky between the rain (job/sky.py): cloud fields from satellite for
+    # the map, stations' measured sunshine, and scores of models' sun
     # forecasts. Optional, like DWD.
     try:
-        sat = sky.satellite(OUT, old.get("sat", []), t0 - PAST * STEP - sky.SAT_STEP)
+        cl = sky.clouds(OUT, (old.get("clouds") or {}).get("frames", []), t0 - PAST * STEP - sky.CLOUD_STEP)
     except Exception as e:
-        print("satellite unavailable:", e)
-        sat = []
+        print("clouds unavailable:", e)
+        cl = []
     try:
-        motion = sky.sat_motion(OUT, sat)
+        cl_motion = sky.cloud_motion(OUT, cl)
     except Exception as e:
         print("cloud motion unavailable:", e)
-        motion = {}
-    try:
-        drift = sky.sat_drift(OUT, sat) if motion else {}
-    except Exception as e:
-        print("drift layers unavailable:", e)
-        drift = {}
+        cl_motion = None
+    for leftover in (OUT / "state").glob("clear-*.npz"):   # from the photo-based layer (until 2026-10-13)
+        leftover.unlink()
     sky_state = sky.Sky(OUT, download)
     now = datetime.now(timezone.utc)
     for step in (sky_state.update_stations, sky_state.update_forecasts, sky_state.score):
@@ -357,13 +354,8 @@ def main():
         index["mix"] = mix_block
     if dwd_meta:
         index["dwd"] = dwd_meta
-    if sat:
-        index["sat"] = sat
-        index["sat_tiers"] = {k: list(bbox) for k, (bbox, _, _) in sky.TIERS.items()}
-        if motion:
-            index["sat_motion"] = motion
-        if drift:
-            index["sat_drift"] = drift
+    if cl:
+        index["clouds"] = {"bbox": list(sky.CLOUD_BBOX), "frames": cl, "motion": cl_motion}
     (OUT / "index.json").write_text(json.dumps(index, separators=(",", ":")))
 
     # KNMI vs Buienradar (vs DWD): store the forecasts as they stand now, then
@@ -387,11 +379,10 @@ def main():
     if dwd_meta:
         keep |= {dwd_meta["fc"]} | {e["file"] for e in dwd_meta["obs"]}
         keep |= set(dwd_meta.get("map", {}).get("fc", [])) | {e["file"] for e in dwd_meta.get("map", {}).get("obs", [])}
-    keep |= {e[k] for e in sat for k in ("file", *sky.TIERS) if k in e}
+    keep |= {f for e in cl for f in (e.get("file"), e.get("flow")) if f} | ({cl_motion} if cl_motion else set())
     if mix_block:
         keep |= {e["file"] for e in mix_block["obs"] + mix_block["fc"]} | {mix_block["knmi_win"]}
-    keep |= {f for e in sat for f in (e.get("flow") or {}).values()} | set(motion.values()) | {f for d in drift.values() for f in d.values()}
-    for p in [*OUT.glob("*.png"), *OUT.glob("*.jpg")]:
+    for p in [*OUT.glob("*.png"), *OUT.glob("*.jpg"), *OUT.glob("*.webp")]:
         if p.name not in keep:
             p.unlink()
     finish(True, f"t0 {index['t0']} ref {index['ref']} frames {len(obs) + len(fc)}; "

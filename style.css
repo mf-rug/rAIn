@@ -318,11 +318,6 @@ html, body {
   .source { left: 10px; bottom: 10px; }
   .layer { left: 10px; bottom: 36px; }
 }
-/* Daytime satellite images are bright; tone them down on the dark theme. */
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) .leaflet-sat-pane { filter: brightness(0.72); }
-}
-:root[data-theme="dark"] .leaflet-sat-pane { filter: brightness(0.72); }
 
 .locate {
   position: absolute;

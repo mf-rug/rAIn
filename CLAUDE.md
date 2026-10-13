@@ -13,7 +13,7 @@ does and the data sources. This file is about how it's built and what bites.
 | `job/compare.py` | KNMI vs Buienradar vs DWD (+ consensus) at 32 places → compare.json. |
 | `job/dwd.py` | DWD RADVOR nowcast: NL-window images (graph line) and full-area map frames. |
 | `job/mix.py` | KNMI + DWD merged: the default timeline (graph, headline, reliability, map "Both"). |
-| `job/sky.py` | EUMETSAT satellite images (map "Clouds"), KNMI stations' sunshine (graph strip), model sun-forecast scores → sky.json. |
+| `job/sky.py` | Cloud field from satellite (map "Clouds"), KNMI stations' sunshine (graph strip), model sun-forecast scores → sky.json. |
 | `.github/workflows/radar.yml` | Runs the job, stores state on the `data` branch, deploys app + data to Pages. |
 | `countries.geojson`, `borders.geojson` | Natural Earth, pre-cut to the radar areas. |
 | `icon-source.svg` | Source of `icon-*.png` (letters are text in Bricolage Grotesque; render in a browser). |
@@ -46,10 +46,12 @@ does and the data sources. This file is about how it's built and what bites.
   grid transparent: `setHole`). The app uses `mix` as its timeline when present; the map
   toggle Both | KNMI | DWD changes only the map. verify.py scores the merged
   forecast (backfilled runs are still KNMI-only).
-- **Sky files:** `sat-*.jpg` (EUMETSAT GeoColour, radar grid's bbox, 1000×1072,
-  every 10 min; listed in `index.json` → `sat`, entries with `gap` have no
-  image), `sun.json` (stations' 10-min sunshine minutes, cloud okta, weather
-  code for the last hour), `sky.json` (sun-forecast scores per model).
+- **Sky files:** `cloud-{t}.webp` (cloud field 0..255, one grid ~25°W–40°E /
+  34–66°N, 1200×969, every 15 min), `cloud-flow-{t}-{next}.png` (motion to the
+  next field) and `cloud-motion-{t}.png` (mean of the last two, for the drift);
+  `index.json` → `clouds` {bbox, frames, motion}. `sun.json` (stations' 10-min
+  sunshine minutes, cloud okta, weather code for the last hour), `sky.json`
+  (sun-forecast scores per model).
 - **Job state** lives in `state/` on the `data` branch (run/obs coarse counts,
   scores, compare snapshots, coverage mask), not deployed.
 
@@ -85,40 +87,25 @@ does and the data sources. This file is about how it's built and what bites.
   handled directly, proportional to the pinch. Leaflet's wheel zoom loses the speed.
 - **Big images on iOS:** keep single images well under ~16 Mpx (that's why DWD map
   frames are one file per step, not one atlas).
+- **Clouds are drawn from a cloud field, not the satellite photo** (rebuilt
+  2026-10-13). Animating GeoColour moved clouds and ground together (city
+  lights and coasts dragged, low clouds stuck, seams between image tiers), and
+  every fix was a heuristic with failure cases, by day too. Now: EUMETSAT's
+  cloud mask (`msg_fes:clm`: white = cloud; catches low cloud/fog that
+  infrared misses: 137 vs 75 of 184 overcast station-times) × infrared
+  shading (`mtg_fd:ir105_hrfi`, grey 52→70), every 15 min on one grid; the
+  app colours it (grey low → white high, per theme). Night detection is weaker
+  for any method (mask: 35 of 67 overcast). Drift beats frozen only modestly
+  (60 min: 10.2% vs 10.9% wrong), as much change is cloud forming/dissolving.
 - **EUMETSAT's WMS snaps any time to the nearest image** (`nearestValue="1"`,
-  no warning header) and returns an old default without a time. The newest
-  real time comes from the layer's own capabilities document; images arrive
-  ~25–45 min late; copies of a neighbour are kept as gaps. Per time: the
-  radar area in detail plus coarser tiers of wider areas (`sky.TIERS`:
-  `sat-wide-*` to ~10°W–25°E, `sat-outer-*` to ~25°W–40°E; bboxes in
-  `index.json` → `sat_tiers`). The app loads a tier only when the map view
-  reaches beyond the finer one.
-- **Cloud motion:** `sat-flow-{tier}-{t}.png` (per image, motion to the next
-  one) and `sat-motion-{tier}-{t}.png` (mean of the last two, for drifting
-  the newest image forward; `index.json` → `sat_motion`): 32×32 RGBA, R/G =
-  128 + 4 × pixels per 10 min. The app warps between images and traces the
-  drift back in 10-minute steps (a straight jump smears). A uniform cloud
-  deck has no texture for optical flow: only its edges moved and drifted
-  fronts got squashed along the wind. Hence CLAHE before the flow and
-  texture-weighted filling (`FLOW_FILL`); bump `FLOW_VERSION` when the method
-  changes so all fields are recomputed (file names carry it).
-- **Drift moves only the clouds** (`sat-{cloud,alpha,bg}-{tier}-{t}.jpg` for
-  the newest image, `index.json` → `sat_drift`): drifting the whole picture
-  slid city lights across the map at night and pulled the image edge loose.
-  Cloud mask from infrared (`mtg_fd:ir105_hrfi`, grey 52→70); night clouds
-  coloured from infrared; GeoColour turns to its night look well before
-  sunset (dark at 2–8° sun height), hence night = sun below 6–14°. The app
-  blends from the plain drift to the split one over the first 20 minutes.
-  The background under clouds is never cloud (that showed as old clouds left
-  behind): the ground as last seen clear (`state/clear-{tier}.npz`, day and
-  night apart), else a multi-scale smooth fill. Low warm clouds (GeoColour's
-  light blue at night) escape the IR mask and stay put.
-- **Tier seams:** a finer tier fades out over its outer 4%, judged at where a
-  moved point comes from (`fine` in the shader); near its border its motion
-  is blended into the coarser tier's (`FLOW_EDGE`, flow at an image border is
-  unreliable); all drawn tiers drift from the newest picture they all have;
-  night cloud colour is fitted per picture to GeoColour's own night clouds. Throttled at 20
-  requests/min, which is why the job fetches, not the app.
+  no warning header) and returns an old default without a time: the newest
+  real time comes from the layer's own capabilities; a frame whose mask equals
+  its neighbour's (hash `m`) is a gap. Images arrive ~25–45 min late; the
+  service is throttled at 20 requests/min (the job fetches, not the app).
+- **Cloud motion:** optical flow needs texture; a uniform deck only moves at
+  its edges (fronts got squashed), hence CLAHE first and texture-weighted
+  filling. The app traces the drift back in 10-minute steps (a straight jump
+  smears).
 - **Weather models' sun at a point was poor on the first check** (2026-10-13:
   HARMONIE missed a sunny afternoon in the south, correlation ~0 with the
   stations). No model sun is shown until sky.json's scores say one beats
@@ -184,13 +171,14 @@ does and the data sources. This file is about how it's built and what bites.
 - GitHub had an Actions incident on 2026-10-12 (push to `data` rejected with
   "fatal error in commit_refs"); the store step now retries 3×.
 
-- **Sky (2026-10-13):** satellite "Clouds" layer and the measured-sunshine
-  strip are live. The job scores 5 models' hourly sun forecasts (and
-  persistence) against the stations in `sky.json`. After a week, check which
-  (if any) beats persistence at 1–3 h and on whole days; only then add a
-  forecast sun band or a day description ("showers with sunny spells" vs
-  "grey, on and off drizzle"). The KNMI 10-min station data also carries
-  weather codes (ww) that separate showers from drizzle.
+- **Sky (2026-10-13):** cloud layer (cloud field, see above) and the
+  measured-sunshine strip are live. The job scores 5 models' hourly sun
+  forecasts (and persistence) against the stations in `sky.json`. After a
+  week, check which (if any) beats persistence at 1–3 h and on whole days;
+  only then add a forecast sun band or a day description ("showers with sunny
+  spells" vs "grey, on and off drizzle"). The KNMI 10-min station data also
+  carries weather codes (ww) that separate showers from drizzle, and station
+  cloud okta for checking the cloud field.
 
 ## Conventions
 

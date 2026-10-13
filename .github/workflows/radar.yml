@@ -81,7 +81,7 @@ jobs:
           git archive HEAD | tar -x -C site
           rm -rf site/job site/.github site/.gitignore site/README.md site/CLAUDE.md site/icon-source.svg
           mkdir site/data
-          cp out/index.json out/skill.json out/coverage.json out/compare.json out/sun.json out/sky.json out/*.png out/*.jpg site/data/ 2>/dev/null || true
+          cp out/index.json out/skill.json out/coverage.json out/compare.json out/sun.json out/sky.json out/*.png out/*.webp site/data/ 2>/dev/null || true
 
       - uses: actions/upload-pages-artifact@v3
         if: steps.build.outputs.changed == 'true' || github.event_name == 'push'

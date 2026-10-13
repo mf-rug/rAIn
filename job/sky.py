@@ -1,15 +1,22 @@
-"""The sky between the rain: satellite cloud images and measured sunshine.
+"""The sky between the rain: clouds from satellite, and measured sunshine.
 
 Radar only sees falling rain. A grey drizzly day and a sunny day with passing
 showers can look the same on it; the difference is in the clouds and the sun.
 
-Satellite: EUMETSAT's GeoColour image from Meteosat Third Generation (true
-colour by day, infrared clouds over city lights at night), every 10 minutes,
-for the radar map's area. An "Advanced Image Product": Core data, CC BY 4.0, no
-key ("Contains modified EUMETSAT Meteosat data"). A request needs an explicit
-time: without one the service returns an old default image. Images appear about
-12 minutes after their time; times not out yet return an error or hang, so
-probes use short timeouts.
+Clouds: a cloud field (0 = clear … 1 = dense cloud) every 15 minutes for a wide
+area (~25°W–40°E, 34–66°N, one grid), which the app draws itself over the
+basemap, the same way day and night, and moves like the rain. Drawing the
+satellite picture (GeoColour) instead meant moving clouds and ground together:
+city lights and coasts got dragged, low clouds stuck, tiers showed seams.
+The field combines EUMETSAT's cloud mask (Meteosat 0°, a derived product: it
+catches low, warm clouds and fog that infrared alone misses) with Meteosat
+Third Generation's infrared (10.5 µm; colder = higher, denser cloud) for
+shading. Checked against KNMI stations' cloud cover, 2026-10-13 afternoon and
+evening (357 station-times): the mask caught 137 of 184 overcast moments,
+infrared alone 75; by night all methods are weaker (mask 35 of 67). Core data,
+CC BY 4.0, no key ("Contains modified EUMETSAT Meteosat data"). Requests need
+an explicit time (the service snaps any time to its nearest image and returns
+an old default without one); images appear ~25–45 minutes late.
 
 Stations: KNMI's 10-minute observations (sunshine minutes, cloud cover, weather
 code) at ~32 Dutch stations, for the measured past hour on the app's sun band.
@@ -23,7 +30,7 @@ time, plus "persistence" (the last measured hour, carried forward) as the
 baseline a model has to beat.
 
 State in OUT/state/sky.json; for the app OUT/sun.json (stations, past hour)
-and the satellite images; the scores in OUT/sky.json.
+and the cloud fields; the scores in OUT/sky.json.
 """
 
 import io
@@ -37,37 +44,27 @@ import cv2
 import numpy as np
 from PIL import Image
 
-SAT_WMS = "https://view.eumetsat.int/geoserver/wms"
-SAT_LAYER = "mtg_fd:rgb_geocolour"
-SAT_STEP = timedelta(minutes=10)
-SAT_W, SAT_H = 1000, 1072        # the radar grid's area (≈1.2 Mercator km per pixel)
-# Coarser images of wider areas under the detailed one, for the map zoomed
-# out (the app loads them only when the view reaches beyond the finer one):
-# key in the index entries → (Mercator bbox, width, height). Re-encoded, as
-# the service's JPEGs are large for a phone.
-TIERS = {
-    "wide": ((-1113195, 5012341, 2782987, 8399738), 1040, 905),   # ≈10°W–25°E, 41–60°N, 3.7 km/px
-    "outer": ((-2782987, 4028802, 4452780, 9876846), 1000, 808),  # ≈25°W–40°E, 34–66°N, 7.2 km/px
-}
-SAT_BUDGET = 60                  # seconds per run for satellite requests
-# Cloud motion between consecutive images, per tier: optical flow (OpenCV
-# Farnebäck), reduced to a FLOW_GRID × FLOW_GRID field (block medians, 3×3
-# median filter, speed cap, light blur) in image pixels per 10 minutes. Tested
-# on 2026-10-13: drifting the newest image along the mean of the last two
-# fields beat a frozen image at 10–60 minutes (wrong cloud/clear pixels at
-# 60 min: 11.5% vs 16.9%).
-# A uniform cloud deck gives the flow nothing to follow: only its edges moved,
-# its interior stood still, and drifted fronts got squashed along the wind.
-# So local contrast is enhanced first (CLAHE: the deck's faint texture becomes
-# trackable), and blocks with little texture take the motion of textured ones
-# around them (FLOW_FILL blocks). Speed variation inside clouds 1.02 → 0.38;
-# wrong pixels at 90 min 14.0% → 11.4% (frozen: 21.6%).
-FLOW_GRID = 32
-FLOW_CAP_KM = 30                 # Mercator km per 10 minutes (~110 km/h on the ground here)
-FLOW_SCALE = 4                   # PNG byte steps per pixel (128 = no motion)
-FLOW_FILL = 6                    # blocks (Gaussian sigma) for filling textureless blocks
-FLOW_VERSION = 3                 # in the file names: a change recomputes all fields
-FLOW_EDGE = 4                    # grid cells: a finer tier's motion blends into the coarser's at its border
+WMS = "https://view.eumetsat.int/geoserver/wms"
+MASK_LAYER = "msg_fes:clm"           # cloud mask: white = cloud, green/blue = clear land/sea
+IR_LAYER = "mtg_fd:ir105_hrfi"
+IR_CLEAR, IR_CLOUD = 52, 70          # grey levels of the service's IR rendering (clear 37–52, cloud ≥ ~50)
+CLOUD_BBOX = (-2782987, 4028802, 4452780, 9876846)   # Web Mercator, ~25°W–40°E, 34–66°N
+CLOUD_W, CLOUD_H = 1200, 969         # ~6 Mercator km per pixel (~3.7 km on the ground here)
+CLOUD_STEP = timedelta(minutes=15)   # the mask's rhythm; the nearest infrared is ≤ 5 min off
+CLOUD_LOW = 0.55                     # a cloudy pixel's least density (warm, low cloud)
+SAT_BUDGET = 60                      # seconds per run for satellite requests
+# Cloud motion between consecutive fields: optical flow (OpenCV Farnebäck) on
+# the field with local contrast enhanced (CLAHE; a uniform deck otherwise has
+# nothing to follow, so only its edges move), reduced to a FLOW_GX × FLOW_GY
+# grid (block medians; blocks with little texture take the motion of textured
+# ones around them; median filter, speed cap, light blur) in field pixels per
+# 10 minutes. Tested on 2026-10-13 evening fields: drifting along the mean of
+# the last two beat a frozen field at 30–90 min (wrong cloud/clear at 60 min
+# 10.2% vs 10.9%; much of the change was low cloud forming and dissolving).
+FLOW_GX, FLOW_GY = 48, 39
+FLOW_CAP_KM = 50                     # Mercator km per 10 minutes
+FLOW_SCALE = 4                       # PNG byte steps per pixel (128 = no motion)
+FLOW_FILL = 6                        # blocks (Gaussian sigma) for filling textureless blocks
 
 STN = "10-minute-in-situ-meteorological-observations/versions/1.0"
 STN_STEP = timedelta(minutes=10)
@@ -99,104 +96,98 @@ def floor(t, step):
     return datetime.fromtimestamp(int(t.timestamp()) // s * s, timezone.utc)
 
 
-# ---------- satellite ----------
+# ---------- clouds ----------
 
-def sat_latest():
-    """Newest image time, from the layer's own (small) capabilities document."""
-    ws, layer = SAT_LAYER.split(":")
-    url = f"https://view.eumetsat.int/geoserver/{ws}/{layer}/ows?service=WMS&version=1.3.0&request=GetCapabilities"
+def layer_latest(layer):
+    """Newest time of a WMS layer, from the layer's own (small) capabilities."""
+    ws, name = layer.split(":")
+    url = f"https://view.eumetsat.int/geoserver/{ws}/{name}/ows?service=WMS&version=1.3.0&request=GetCapabilities"
     with urllib.request.urlopen(url, timeout=20) as r:
         caps = r.read().decode()
     dim = caps.split('<Dimension name="time"', 1)[1].split(">", 1)[1].split("<", 1)[0]
     return parse(dim.split("/")[1].replace(".000Z", "Z"))
 
 
-def sat_image(t, bbox, w, h):
-    q = (f"service=WMS&version=1.3.0&request=GetMap&layers={SAT_LAYER}&styles=&crs=EPSG:3857"
-         f"&bbox={','.join(str(v) for v in bbox)}&width={w}&height={h}&format=image/jpeg&time={iso(t)}")
-    with urllib.request.urlopen(f"{SAT_WMS}?{q}", timeout=20) as r:
+def wms(layer, t, fmt):
+    q = (f"service=WMS&version=1.3.0&request=GetMap&layers={layer}&styles=&crs=EPSG:3857"
+         f"&bbox={','.join(str(v) for v in CLOUD_BBOX)}&width={CLOUD_W}&height={CLOUD_H}&format={fmt}&time={iso(t)}")
+    with urllib.request.urlopen(f"{WMS}?{q}", timeout=25) as r:
         body = r.read()
         if not r.headers.get("Content-Type", "").startswith("image/"):
             raise ValueError(r.headers.get("Content-Type"))
     return body
 
 
-def satellite(out, old, oldest):
-    """Satellite images from oldest to the newest out, one per 10 minutes.
-    Returns [{"t", "file", "wide", "outer"}]; entries with "gap" mark times without an image.
+def cloud_field(t):
+    """→ (field 0..1 as float array, the mask image's bytes) for time t."""
+    mask_png = wms(MASK_LAYER, t, "image/png")
+    ir_t = t - timedelta(minutes=5) if t.minute % 10 == 5 else t      # infrared every 10 min
+    ir = np.asarray(Image.open(io.BytesIO(wms(IR_LAYER, ir_t, "image/jpeg"))).convert("L"), np.float32)
+    c = np.asarray(Image.open(io.BytesIO(mask_png)).convert("RGB")).astype(np.int16)
+    mask = ((c[..., 0] > 200) & (c[..., 1] > 200) & (c[..., 2] > 200)).astype(np.float32)
+    mask = cv2.GaussianBlur(mask, (0, 0), 1.0)                        # the mask is blocky (~5 km here)
+    dense = np.clip((ir - IR_CLEAR) / (IR_CLOUD - IR_CLEAR), 0, 1)
+    return np.clip(mask * (CLOUD_LOW + (1 - CLOUD_LOW) * dense), 0, 1), mask_png
 
-    The service answers any time with the nearest image it has, so a time
-    with no image of its own comes back as a copy of its neighbour: such
-    copies are kept as gaps (and not requested again)."""
-    have = {e["t"]: e for e in old if e["t"] >= iso(oldest) and (e.get("gap") or (out / e["file"]).exists())}
+
+def clouds(out, old, oldest):
+    """Cloud fields from oldest to the newest out, one per 15 minutes.
+    Returns [{"t", "file", "m"}] (m: a hash of the mask image); entries with
+    "gap" mark times without a mask of their own. The service answers any time
+    with its nearest image, so a copy of a neighbour's mask is a gap (kept, so
+    it isn't asked for again, except at the newest end: retried next run)."""
+    import hashlib
+    have = {e["t"]: e for e in old if e["t"] >= iso(oldest) and (e.get("gap") or (out / e.get("file", "")).exists())}
     real = [t for t, e in have.items() if not e.get("gap")]
     have = {t: e for t, e in have.items() if not e.get("gap") or (real and t < max(real))}
     try:
-        t = floor(sat_latest(), SAT_STEP)
+        newest = min(layer_latest(MASK_LAYER), layer_latest(IR_LAYER) + timedelta(minutes=5))
     except Exception as e:
-        print("satellite unavailable:", e)
+        print("clouds unavailable:", e)
         return sorted(have.values(), key=lambda e: e["t"])
+    t = floor(newest, CLOUD_STEP)
     start = datetime.now(timezone.utc)
     while t >= oldest and (datetime.now(timezone.utc) - start).total_seconds() < SAT_BUDGET:
-        e = have.get(iso(t))
-        try:
-            if e is None:
-                name = f"sat-{t:%Y%m%d%H%M}.jpg"
-                (out / name).write_bytes(sat_image(t, (X0, Y0, X1, Y1), SAT_W, SAT_H))
-                e = have[iso(t)] = {"t": iso(t), "file": name}
-                print("satellite", iso(t))
-            for key, (bbox, w, h) in TIERS.items():
-                if "file" in e and not (e.get(key) and (out / e[key]).exists()):
-                    name = f"sat-{key}-{t:%Y%m%d%H%M}.jpg"
-                    Image.open(io.BytesIO(sat_image(t, bbox, w, h))).save(out / name, quality=65, optimize=True)
-                    e[key] = name
-        except Exception as ex:   # retried next run
-            print("satellite failed", iso(t), getattr(ex, "code", ex))
-        t -= SAT_STEP
-    # Copies of a neighbour: keep the earlier one. A copy at the newest end is
-    # dropped and asked for again next run (the capabilities can list a time
-    # before its image is served).
+        if iso(t) not in have:
+            try:
+                field, mask_png = cloud_field(t)
+                name = f"cloud-{t:%Y%m%d%H%M}.webp"
+                Image.fromarray((field * 255).astype(np.uint8), "L").save(out / name, quality=60)
+                have[iso(t)] = {"t": iso(t), "file": name, "m": hashlib.md5(mask_png).hexdigest()[:12]}
+                print("clouds", iso(t))
+            except Exception as ex:   # retried next run
+                print("clouds failed", iso(t), getattr(ex, "code", ex))
+        t -= CLOUD_STEP
     entries = sorted(have.values(), key=lambda e: e["t"])
     prev = None
     for k, e in enumerate(entries):
         if e.get("gap"):
             continue
-        body = (out / e["file"]).read_bytes()
-        if prev is not None and body == prev:
-            (out / e.pop("file")).unlink()
-            for key in TIERS:
-                if e.get(key):
-                    (out / e.pop(key)).unlink(missing_ok=True)
+        if prev is not None and e.get("m") == prev:
+            (out / e.pop("file")).unlink(missing_ok=True)
+            e.pop("flow", None)
             e["gap"] = True
             if all(x.get("gap") for x in entries[k:]):
-                return [x for x in entries[:k]]
-        prev = body
+                return entries[:k]
+        prev = e.get("m")
     return entries
 
 
-def tier_geometry():
-    """key → (bbox, width, height) for every tier, the detailed one as "file"."""
-    return {"file": ((X0, Y0, X1, Y1), SAT_W, SAT_H), **TIERS}
-
-
-def flow_field(pa, pb, minutes, km_per_px):
-    """Cloud motion from image a to image b as a grid of (dx, dy) in pixels per 10 min."""
+def flow_field(pa, pb, minutes):
+    """Cloud motion from field a to field b: FLOW_GY × FLOW_GX grid of (dx, dy)
+    in field pixels per 10 minutes."""
     clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-
-    def grey(p, s):
-        im = Image.open(p).convert("L")
-        return clahe.apply(np.asarray(im.resize((im.width // s, im.height // s), Image.BILINEAR)))
-    s = 2 if km_per_px < 2 else 1          # the detailed tier is fine enough at half size
-    a = grey(pa, s)
-    f = cv2.calcOpticalFlowFarneback(a, grey(pb, s), None, 0.5, 4, 21, 3, 7, 1.5, 0) * s * 10 / minutes
+    a = clahe.apply(np.asarray(Image.open(pa).convert("L")))
+    b = clahe.apply(np.asarray(Image.open(pb).convert("L")))
+    f = cv2.calcOpticalFlowFarneback(a, b, None, 0.5, 4, 21, 3, 7, 1.5, 0) * 10 / minutes
     af = a.astype(np.float32)
     texture = np.hypot(cv2.Sobel(af, cv2.CV_32F, 1, 0, ksize=5), cv2.Sobel(af, cv2.CV_32F, 0, 1, ksize=5))
     h, w = f.shape[:2]
-    g = np.zeros((FLOW_GRID, FLOW_GRID, 2), np.float32)
-    conf = np.zeros((FLOW_GRID, FLOW_GRID), np.float32)
-    for j in range(FLOW_GRID):
-        for i in range(FLOW_GRID):
-            sl = (slice(j * h // FLOW_GRID, (j + 1) * h // FLOW_GRID), slice(i * w // FLOW_GRID, (i + 1) * w // FLOW_GRID))
+    g = np.zeros((FLOW_GY, FLOW_GX, 2), np.float32)
+    conf = np.zeros((FLOW_GY, FLOW_GX), np.float32)
+    for j in range(FLOW_GY):
+        for i in range(FLOW_GX):
+            sl = (slice(j * h // FLOW_GY, (j + 1) * h // FLOW_GY), slice(i * w // FLOW_GX, (i + 1) * w // FLOW_GX))
             g[j, i] = np.median(f[sl].reshape(-1, 2), axis=0)
             conf[j, i] = texture[sl].mean()
     conf = np.clip(conf / max(np.percentile(conf, 75), 1e-6), 0, 1)
@@ -204,7 +195,7 @@ def flow_field(pa, pb, minutes, km_per_px):
     around = num / np.maximum(cv2.GaussianBlur(conf, (0, 0), FLOW_FILL), 1e-6)[..., None]
     g = conf[..., None] * g + (1 - conf[..., None]) * around
     g = np.stack([cv2.medianBlur(np.ascontiguousarray(g[..., c]), 3) for c in range(2)], -1)
-    cap = FLOW_CAP_KM / km_per_px
+    cap = FLOW_CAP_KM / ((CLOUD_BBOX[2] - CLOUD_BBOX[0]) / CLOUD_W / 1000)
     speed = np.hypot(g[..., 0], g[..., 1])
     g *= np.minimum(1, cap / np.maximum(speed, 1e-6))[..., None]
     return cv2.GaussianBlur(g, (3, 3), 0)
@@ -221,194 +212,31 @@ def load_flow(path):
     return (np.asarray(Image.open(path), np.float32)[..., :2] - 128) / FLOW_SCALE
 
 
-# For drifting the newest image forward, only its clouds should move: the
-# ground (coasts, fields, and at night the city lights GeoColour shows) stays
-# put. Infrared (10.5 µm, the same by day and night; cold = cloud) gives the
-# cloud mask. The moving clouds are the picture by day and, at night (by the
-# sun's height), coloured from the infrared, which has no city lights in it.
-# The fixed background: the picture where it's clear; under clouds a blur of
-# the clear parts around, or the cloud itself where no clear sky is near (it
-# then stays put rather than leaving a hole).
-IR_LAYER = "mtg_fd:ir105_hrfi"
-IR_CLEAR, IR_CLOUD = 52, 70      # grey levels of the service's IR rendering (2026-10-13: clear 37–52, cloud ≥ ~50, median 66)
-BG_SIGMA = 12                    # px, at the image's half size
-
-
-def smooth_fill(img, clear):
-    """Clear surroundings blurred into cloudy areas: normalised convolution at
-    growing scales, then the median clear colour. Smooth, no hard edges."""
-    out = np.zeros_like(img)
-    have = np.zeros(clear.shape, np.float32)
-    for sigma in (BG_SIGMA, BG_SIGMA * 3, BG_SIGMA * 9):
-        num = cv2.GaussianBlur(img * clear[..., None], (0, 0), sigma)
-        den = cv2.GaussianBlur(clear, (0, 0), sigma)
-        est = num / np.maximum(den, 1e-6)[..., None]
-        wgt = np.clip(den / 0.2, 0, 1) * (1 - have)      # fill what coarser scales haven't
-        out += est * wgt[..., None]
-        have += wgt
-    typical = np.median(img[clear > 0.8], axis=0) if (clear > 0.8).sum() > 100 else np.array([30, 33, 40], np.float32)
-    return out + typical * (1 - have)[..., None]
-
-
-def clear_view(out, key, img, cloud, night):
-    """The tier's ground as last seen clear, by day and by night (state, half
-    size): updated where this image is clear. → (picture, how much of it is
-    known 0..1) for this image's mix of day and night."""
-    path = out / "state" / f"clear-{key}.npz"
-    h, w = cloud.shape
-    if path.exists():
-        z = np.load(path)
-        day, nig, kd, kn = z["day"].astype(np.float32), z["night"].astype(np.float32), z["kd"].astype(np.float32), z["kn"].astype(np.float32)
-        if day.shape[:2] != (h, w):
-            day = None
-    if not path.exists() or day is None:
-        day, nig = np.zeros((h, w, 3), np.float32), np.zeros((h, w, 3), np.float32)
-        kd, kn = np.zeros((h, w), np.float32), np.zeros((h, w), np.float32)
-    n = night[..., 0]
-    upd = (cloud < 0.15).astype(np.float32)
-    for pic, k, wgt in ((day, kd, upd * (n < 0.5)), (nig, kn, upd * (n >= 0.5))):
-        pic[:] = pic * (1 - wgt[..., None]) + img * wgt[..., None]
-        k[:] = np.maximum(k, wgt)
-    np.savez_compressed(path, day=day.astype(np.uint8), night=nig.astype(np.uint8), kd=(kd > 0.5), kn=(kn > 0.5))
-    seen = day * (1 - night) + nig * night
-    known = (kd * (1 - n) + kn * n)[..., None]
-    return seen, known
-
-
-def drift_layers(out, e, key, bbox, w, h):
-    """→ {"cloud", "alpha", "bg"} file names for image e of a tier (made once)."""
-    t = parse(e["t"])
-    names = {k: f"sat-{k}-{key}-{t:%Y%m%d%H%M}.jpg" for k in ("cloud", "alpha", "bg")}
-    if all((out / n).exists() for n in names.values()):
-        return names
-    q = (f"service=WMS&version=1.3.0&request=GetMap&layers={IR_LAYER}&styles=&crs=EPSG:3857"
-         f"&bbox={','.join(str(v) for v in bbox)}&width={w // 2}&height={h // 2}&format=image/jpeg&time={iso(t)}")
-    with urllib.request.urlopen(f"{SAT_WMS}?{q}", timeout=20) as r:
-        if not r.headers.get("Content-Type", "").startswith("image/"):
-            raise ValueError(r.headers.get("Content-Type"))
-        ir = np.asarray(Image.open(io.BytesIO(r.read())).convert("L"), np.float32)
-    img = np.asarray(Image.open(out / e[key]).convert("RGB").resize((w // 2, h // 2), Image.BILINEAR), np.float32)
-    cloud = np.clip((ir - IR_CLEAR) / (IR_CLOUD - IR_CLEAR), 0, 1)
-    # Night from the sun's height at each pixel (GeoColour switches to its
-    # night look well before sunset; 2026-10-13 it was dark at 2–8°): 1 below
-    # 6°, 0 above 14°.
-    xs = bbox[0] + (np.arange(w // 2) + 0.5) * (bbox[2] - bbox[0]) / (w // 2)
-    ys = bbox[3] - (np.arange(h // 2) + 0.5) * (bbox[3] - bbox[1]) / (h // 2)
-    lon = xs / 20037508.34 * 180
-    lat = np.degrees(2 * np.arctan(np.exp(ys / 6378137)) - np.pi / 2)
-    d = t.timetuple().tm_yday
-    decl = np.radians(23.44) * np.sin(2 * np.pi / 365 * (d - 81))
-    ha = np.radians((t.hour + t.minute / 60 + lon[None, :] / 15 - 12) * 15)
-    la = np.radians(lat)[:, None]
-    elev = np.degrees(np.arcsin(np.sin(la) * np.sin(decl) + np.cos(la) * np.cos(decl) * np.cos(ha)))
-    night = np.clip((14 - elev) / 8, 0, 1)[..., None].astype(np.float32)
-    # The moving clouds: by day the picture itself; at night coloured from the
-    # infrared (as GeoColour draws night clouds), which has no city lights in it.
-    v = np.clip((ir - IR_CLEAR) / (130 - IR_CLEAR), 0, 1)[..., None]
-    # Colour per infrared value fitted on this picture's own cloudy night pixels
-    # (city lights left out), so the drifting clouds look like GeoColour's.
-    grey = img.mean(axis=2)
-    spots = cv2.morphologyEx(grey, cv2.MORPH_TOPHAT, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)))
-    fit = (night[..., 0] > 0.5) & (cloud > 0.6) & (spots < 12)
-    base, gain = np.array([30, 33, 40], np.float32), np.array([105, 110, 120], np.float32)
-    if fit.sum() > 2000:
-        A = np.stack([np.ones(fit.sum()), v[..., 0][fit]], 1)
-        coef = np.linalg.lstsq(A, img[fit], rcond=None)[0]
-        if (coef[1] > 0).all():
-            base, gain = coef[0].astype(np.float32), coef[1].astype(np.float32)
-    ir_rgb = base + v * gain
-    no_lights = img * (1 - night) + ir_rgb * night
-    # Background: clear parts as they are (with their city lights); under
-    # clouds the ground as last seen clear (day and night kept apart), else a
-    # smooth blur of the clear surroundings, else a typical ground colour.
-    # Never the cloud itself: that showed as old clouds left behind.
-    clear = (1 - cloud)[..., None]
-    seen, known = clear_view(out, key, img, cloud, night)
-    under = smooth_fill(img, clear[..., 0])
-    under = seen * known + under * (1 - known)
-    bg = img * clear + under * (1 - clear)
-    full = (w, h)
-    Image.fromarray(np.clip(no_lights, 0, 255).astype(np.uint8)).resize(full, Image.BILINEAR).save(out / names["cloud"], quality=75)
-    Image.fromarray((cloud * 255).astype(np.uint8), "L").save(out / names["alpha"], quality=85)
-    Image.fromarray(np.clip(bg, 0, 255).astype(np.uint8)).resize(full, Image.BILINEAR).save(out / names["bg"], quality=75)
-    return names
-
-
-def sat_drift(out, entries):
-    """Drift layers for the newest image of each tier: {tier: {"cloud", "alpha", "bg"}}."""
+def cloud_motion(out, entries):
+    """Adds each field's motion towards the next one ("flow") and returns the
+    motion for drifting the newest field forward: the mean of the last two
+    (file name, or None)."""
     real = [e for e in entries if e.get("file")]
-    if not real:
-        return {}
-    res = {}
-    for key, (bbox, w, h) in tier_geometry().items():
-        e = real[-1]
-        if not e.get(key):
+    fields = []
+    for a, b in zip(real, real[1:]):
+        minutes = (parse(b["t"]) - parse(a["t"])).total_seconds() / 60
+        if minutes > 45:
             continue
-        try:
-            res[key] = drift_layers(out, e, key, bbox, w, h)
-        except Exception as ex:
-            print("drift layers failed", key, e["t"], getattr(ex, "code", ex))
-    return res
-
-
-def blend_edge(g, fine, gc, coarse):
-    """A fine tier's motion grid with its outer FLOW_EDGE cells blended into the
-    coarse tier's motion there (resampled, converted to fine pixels)."""
-    (fb, fw, fh), (cb, cw, ch) = fine, coarse
-    n = g.shape[0]
-    j, i = np.mgrid[0:n, 0:n].astype(np.float32)
-    x = fb[0] + (i + 0.5) / n * (fb[2] - fb[0])            # Mercator of the fine cell centres
-    y = fb[3] - (j + 0.5) / n * (fb[3] - fb[1])
-    ci = (x - cb[0]) / (cb[2] - cb[0]) * n - 0.5            # → coarse grid coordinates
-    cj = (cb[3] - y) / (cb[3] - cb[1]) * n - 0.5
-    sampled = np.stack([cv2.remap(np.ascontiguousarray(gc[..., k]), ci, cj, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
-                        for k in range(2)], -1)
-    scale = ((cb[2] - cb[0]) / cw) / ((fb[2] - fb[0]) / fw)  # coarse px → fine px
-    d = np.minimum(np.minimum(i, j), np.minimum(n - 1 - i, n - 1 - j))
-    wgt = np.clip(d / FLOW_EDGE, 0, 1)[..., None]
-    return wgt * g + (1 - wgt) * sampled * scale
-
-
-def sat_motion(out, entries):
-    """Adds each image's motion towards the next one ("flow": {tier: file})
-    and returns the motion for drifting the newest image forward: the mean of
-    the last two fields ({tier: file}, or {})."""
-    real = [e for e in entries if e.get("file")]
-    motion = {}
-    geo = tier_geometry()
-    coarser = {}   # (tier, image time) → field, of the coarser tier just done
-    # Coarsest first: near its border a finer tier's flow is unreliable (half
-    # the neighbourhood is missing) and would move clouds differently from the
-    # tier underneath, showing a seam; there it takes the coarser motion.
-    order = list(geo)[::-1]
-    for n, key in enumerate(order):
-        bbox, w, h = geo[key]
-        km = (bbox[2] - bbox[0]) / w / 1000
-        under = order[n - 1] if n else None
-        fields = []
-        for a, b in zip(real, real[1:]):
-            minutes = (parse(b["t"]) - parse(a["t"])).total_seconds() / 60
-            if not a.get(key) or not b.get(key) or minutes > 30:
+        name = f"cloud-flow-{a['t'][:16].replace('-', '').replace(':', '').replace('T', '')}-{b['t'][11:16].replace(':', '')}.png"
+        if a.get("flow") != name or not (out / name).exists():
+            try:
+                save_flow(flow_field(out / a["file"], out / b["file"], minutes), out / name)
+            except Exception as ex:
+                print("cloud motion failed", a["t"], ex)
                 continue
-            name = f"sat-flow{FLOW_VERSION}-{key}-{a['t'][:16].replace('-', '').replace(':', '').replace('T', '')}.png"
-            if (a.get("flow") or {}).get(key) != name or not (out / name).exists():
-                try:
-                    g = flow_field(out / a[key], out / b[key], minutes, km)
-                    if under and (under, a["t"]) in coarser:
-                        g = blend_edge(g, (bbox, w, h), coarser[(under, a["t"])], geo[under])
-                    save_flow(g, out / name)
-                except Exception as ex:
-                    print("cloud motion failed", key, a["t"], ex)
-                    continue
-                a.setdefault("flow", {})[key] = name
-            coarser[(key, a["t"])] = load_flow(out / a["flow"][key])
-            fields.append(a["flow"][key])
-        if fields:
-            name = f"sat-motion{FLOW_VERSION}-{key}-{real[-1]['t'][:16].replace('-', '').replace(':', '').replace('T', '')}.png"
-            if not (out / name).exists():
-                save_flow(np.mean([load_flow(out / f) for f in fields[-2:]], axis=0), out / name)
-            motion[key] = name
-    return motion
+            a["flow"] = name
+        fields.append(name)
+    if not fields:
+        return None
+    name = f"cloud-motion-{real[-1]['t'][:16].replace('-', '').replace(':', '').replace('T', '')}.png"
+    if not (out / name).exists():
+        save_flow(np.mean([load_flow(out / f) for f in fields[-2:]], axis=0), out / name)
+    return name
 
 
 # ---------- sun position ----------
