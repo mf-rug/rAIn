@@ -12,6 +12,7 @@ does and the data sources. This file is about how it's built and what bites.
 | `job/verify.py` | Forecast reliability (CSI at ~4 km, per ~40 km tile, last 6 h) → skill.json. |
 | `job/compare.py` | KNMI vs Buienradar vs DWD (+ consensus) at 32 places → compare.json. |
 | `job/dwd.py` | DWD RADVOR nowcast: NL-window images (graph line) and full-area map frames. |
+| `job/sky.py` | EUMETSAT satellite images (map "Clouds"), KNMI stations' sunshine (graph strip), model sun-forecast scores → sky.json. |
 | `.github/workflows/radar.yml` | Runs the job, stores state on the `data` branch, deploys app + data to Pages. |
 | `countries.geojson`, `borders.geojson` | Natural Earth, pre-cut to the radar areas. |
 | `icon-source.svg` | Source of `icon-*.png` (letters are text in Bricolage Grotesque; render in a browser). |
@@ -33,6 +34,10 @@ does and the data sources. This file is about how it's built and what bites.
   `dwd` block), `obs-*.png`, `fc-REF-T.png`, `skill.json`, `compare.json`,
   `coverage.json`, DWD files (`dwd-fc-*`, `dwd-obs-*` = NL window; `dwd-map-*` =
   full DWD area on its own 1113×1043 grid).
+- **Sky files:** `sat-*.jpg` (EUMETSAT GeoColour, radar grid's bbox, 1000×1072,
+  every 10 min; listed in `index.json` → `sat`, entries with `gap` have no
+  image), `sun.json` (stations' 10-min sunshine minutes, cloud okta, weather
+  code for the last hour), `sky.json` (sun-forecast scores per model).
 - **Job state** lives in `state/` on the `data` branch (run/obs coarse counts,
   scores, compare snapshots, coverage mask), not deployed.
 
@@ -68,6 +73,15 @@ does and the data sources. This file is about how it's built and what bites.
   handled directly, proportional to the pinch. Leaflet's wheel zoom loses the speed.
 - **Big images on iOS:** keep single images well under ~16 Mpx (that's why DWD map
   frames are one file per step, not one atlas).
+- **EUMETSAT's WMS snaps any time to the nearest image** (`nearestValue="1"`,
+  no warning header) and returns an old default without a time. The newest
+  real time comes from the layer's own capabilities document; images arrive
+  ~25–45 min late; copies of a neighbour are kept as gaps. Throttled at 20
+  requests/min, which is why the job fetches, not the app.
+- **Weather models' sun at a point was poor on the first check** (2026-10-13:
+  HARMONIE missed a sunny afternoon in the south, correlation ~0 with the
+  stations). No model sun is shown until sky.json's scores say one beats
+  persistence.
 - **Local Python:** shapely + numpy 2 clash in the system Python (MultiPolygon
   creation fails). Use a fresh venv for job code that uses shapely.
 - **`job/__pycache__/` once got committed** with absolute local paths. It's in
@@ -124,6 +138,14 @@ does and the data sources. This file is about how it's built and what bites.
   what that refers to (possibly not this project).
 - GitHub had an Actions incident on 2026-10-12 (push to `data` rejected with
   "fatal error in commit_refs"); the store step now retries 3×.
+
+- **Sky (2026-10-13):** satellite "Clouds" layer and the measured-sunshine
+  strip are live. The job scores 5 models' hourly sun forecasts (and
+  persistence) against the stations in `sky.json`. After a week, check which
+  (if any) beats persistence at 1–3 h and on whole days; only then add a
+  forecast sun band or a day description ("showers with sunny spells" vs
+  "grey, on and off drizzle"). The KNMI 10-min station data also carries
+  weather codes (ww) that separate showers from drizzle.
 
 ## Conventions
 

@@ -138,6 +138,8 @@ html, body {
 #graph .br { fill: none; stroke: var(--ink); stroke-width: 1.25; stroke-dasharray: 3 2; opacity: 0.6; }
 #graph .dwd { fill: none; stroke: var(--downpour); stroke-width: 1.5; stroke-dasharray: 0.5 3; stroke-linecap: round; opacity: 0.8; }
 #graph .pending { stroke: var(--line); stroke-width: 3; stroke-linecap: round; }
+#graph .sun { fill: var(--now); }
+#graph .sun-cloud { fill: var(--line); }
 
 .readout {
   display: flex;
@@ -267,6 +269,22 @@ html, body {
 }
 .source button[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
 .source button[hidden] { display: none; }
+.layer {
+  position: absolute;
+  z-index: 500;
+  left: 12px;
+  bottom: 52px;
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--paper);
+  color: var(--muted);
+  font: 700 13px var(--body);
+  cursor: pointer;
+}
+.layer[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
+.layer[hidden] { display: none; }
+#clouds-time { font-weight: 400; font-variant-numeric: tabular-nums; }
 
 .locate {
   position: absolute;

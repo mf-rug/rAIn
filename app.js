@@ -87,6 +87,7 @@ const state = {
   coverage: { knmi: null, dwd: null },
   compare: null,        // KNMI vs Buienradar scores, from job/compare.py
   skill: null,          // recent forecast reliability, from job/verify.py
+  sun: null,            // stations' measured sunshine, last hour, from job/sky.py
   src: null,            // 'data' (job output) or 'wms'
   point: null,          // {lat, lng, label}
   frames: [],           // ordered by time
@@ -473,6 +474,7 @@ function drawRadar() {
   gpu.canvas.style.visibility = useDwd ? 'hidden' : 'visible';
   if (dwd.renderer) dwd.renderer.canvas.style.visibility = useDwd ? 'visible' : 'hidden';
   const fr = useDwd ? dwd.frames : state.frames;
+  drawSat();
   if (!fr.length) return r.draw(null);
   const i = Math.min(Math.floor(state.pos), fr.length - 1);
   const t = state.pos - i;
@@ -592,7 +594,7 @@ async function highlightCountry(pt) {
   homeName = home?.properties.name ?? null;
   homeLayers.forEach((l) => l.remove());
   homeLayers = [];
-  if (!home) return;
+  if (!home || sat.on) return;
   const css = getComputedStyle(document.documentElement);
   const flip = (ring) => ring.map(([x, y]) => [y, x]);
   const world = [[30, -40], [30, 50], [75, 50], [75, -40]];
@@ -900,6 +902,124 @@ for (const b of document.querySelectorAll('.source button')) {
   b.addEventListener('click', () => setMapSource(b.dataset.src));
 }
 
+// ---------- sky: satellite clouds and measured sunshine ----------
+// Radar only sees falling rain: a grey drizzly day and a sunny day with passing
+// showers can look the same on it. job/sky.py publishes EUMETSAT's satellite
+// image of the radar's area (every 10 minutes, ~25–45 minutes behind) and KNMI
+// stations' sunshine minutes over the last hour.
+
+map.createPane('sat');
+map.getPane('sat').style.zIndex = 300;   // over the basemap, under the veil and the radar
+map.getPane('sat').style.pointerEvents = 'none';
+const sat = { list: [], overlays: new Map(), on: false };
+
+function syncSat(list) {
+  sat.list = (list ?? []).filter((e) => e.file).map((e) => ({ t: Date.parse(e.t), url: DATA + e.file }));
+  $('clouds').hidden = !sat.list.length;
+  const keep = new Set(sat.list.map((e) => e.url));
+  for (const [url, o] of sat.overlays) {
+    if (!keep.has(url)) { o.remove(); sat.overlays.delete(url); }
+  }
+  if (sat.on) for (const e of sat.list) satOverlay(e);
+  requestDraw();
+}
+
+// All of the hour's images are added at once (invisible), so they're loaded
+// by the time the timeline reaches them.
+function satOverlay(e) {
+  let o = sat.overlays.get(e.url);
+  if (!o) {
+    o = L.imageOverlay(e.url, BOUNDS, { pane: 'sat', opacity: 0, interactive: false }).addTo(map);
+    sat.overlays.set(e.url, o);
+  }
+  return o;
+}
+
+// The image for the timeline position, cross-faded into the next one. After
+// the newest image (always, for the forecast) it stays on the newest.
+function drawSat() {
+  const label = $('clouds-time');
+  if (!sat.on || !sat.list.length || !state.frames.length) {
+    for (const o of sat.overlays.values()) o.setOpacity(0);
+    label.textContent = '';
+    return;
+  }
+  const t = state.frames[0].t + state.pos * STEP, l = sat.list;
+  const i = Math.max(0, l.findLastIndex((e) => e.t <= t));
+  const a = l[i], b = l[i + 1];
+  const f = b && t > a.t ? Math.min(1, (t - a.t) / (b.t - a.t)) : 0;
+  for (const [url, o] of sat.overlays) {
+    const on = url === a.url ? 1 : b && url === b.url ? f : 0;
+    o.setOpacity(on);
+    o.setZIndex(url === a.url ? 1 : 2);
+  }
+  label.textContent = hhmm(f > 0.5 ? b.t : a.t);
+}
+
+function setClouds(on) {
+  sat.on = on;
+  store.set('clouds', on);
+  $('clouds').setAttribute('aria-pressed', String(on));
+  if (on) for (const e of sat.list) satOverlay(e);
+  homeName = null;
+  homeLayers.forEach((l) => l.remove());
+  homeLayers = [];
+  if (state.point) highlightCountry(state.point);
+  requestDraw();
+}
+$('clouds').addEventListener('click', () => setClouds(!sat.on));
+
+// Sun height in degrees, to leave out the night and the lowest sun.
+function sunElevation(t, lat, lng) {
+  const d = new Date(t);
+  const day = (Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()) - Date.UTC(d.getUTCFullYear(), 0, 0)) / 864e5;
+  const h = d.getUTCHours() + d.getUTCMinutes() / 60;
+  const rad = Math.PI / 180;
+  const decl = 23.44 * rad * Math.sin(2 * Math.PI / 365 * (day - 81));
+  const ha = (h + lng / 15 - 12) * 15 * rad;
+  return Math.asin(Math.sin(lat * rad) * Math.sin(decl) + Math.cos(lat * rad) * Math.cos(decl) * Math.cos(ha)) / rad;
+}
+
+const SUN_KM = 30;   // farther than this, a station says little about the sky here
+
+// Measured sunshine near the point: the nearest station that records it, as
+// [{t, v}] per 10 minutes ending at t (v = share of the time in sunshine,
+// null at night).
+function sunSeries(pt) {
+  if (!pt || !state.frames.length) return null;
+  if (DEMO) {
+    const pts = [];
+    for (let k = 6; k >= 1; k--) {
+      const t = state.t0 - (k - 1) * 10 * 60e3, m = (t - state.t0) / 60e3;
+      const wet = Math.max(...[0, 2.5, 5, 7.5, 10].map((d) => DEMO.rain(m - d)));
+      pts.push({ t, v: Math.max(0, Math.min(1, 1 - wet * 2 + (DEMO.grey ? -1 : 0))) });
+    }
+    return { name: 'De Bilt', pts };
+  }
+  const s = state.sun;
+  if (!s?.stations) return null;
+  const km = (lat, lng) => Math.hypot((lat - pt.lat) * 111.2, (lng - pt.lng) * 111.2 * Math.cos(pt.lat * Math.PI / 180));
+  let best = null;
+  s.stations.forEach(([, name, lat, lng], k) => {
+    const d = km(lat, lng);
+    if (d <= SUN_KM && s.ss[k].some((v) => v != null) && (!best || d < best.d)) best = { name, lat, lng, d, k };
+  });
+  if (!best) return null;
+  const pts = s.t.map((ts, j) => {
+    const t = Date.parse(ts), v = s.ss[best.k][j];
+    const day = sunElevation(t - 5 * 60e3, best.lat, best.lng) > 3;
+    return { t, v: v == null || !day ? null : Math.min(1, v / 10) };
+  });
+  return pts.some((p) => p.v != null) ? { name: best.name, pts } : null;
+}
+
+// Sun at time t from the series ("sunny", "some sun", "no sun"), or null.
+function sunWord(sun, t) {
+  const p = sun?.pts.find((x) => t > x.t - 10 * 60e3 && t <= x.t);
+  if (p?.v == null) return null;
+  return p.v >= 0.7 ? 'sunny' : p.v >= 0.2 ? 'some sun' : 'no sun';
+}
+
 // ---------- loading indicator ----------
 
 const loading = { started: 0, timer: null, error: '' };
@@ -946,9 +1066,9 @@ async function fetchPlan() {
       const entries = (list, kind) => list.map((e) => [`${kind}|${Date.parse(e.t)}`, DATA + e.file]);
       const extra = (name) => fetch(`${DATA}${name}?v=${Math.floor(Date.now() / 30e3)}`, { cache: 'no-store' })
         .then((r) => (r.ok ? r.json() : null)).catch(() => null);
-      const [skill, coverage, compare] = await Promise.all([extra('skill.json'), extra('coverage.json'), extra('compare.json')]);
+      const [skill, coverage, compare, sun] = await Promise.all(['skill.json', 'coverage.json', 'compare.json', 'sun.json'].map(extra));
       const dwd = idx.dwd?.fc ? { ...idx.dwd, base: DATA } : null;
-      return { t0, ref: Date.parse(idx.ref), data: [...entries(idx.obs, 'obs'), ...entries(idx.fc, 'fc')], skill, coverage, compare, dwd };
+      return { t0, ref: Date.parse(idx.ref), data: [...entries(idx.obs, 'obs'), ...entries(idx.fc, 'fc')], skill, coverage, compare, dwd, sun, sat: idx.sat ?? [] };
     }
     console.warn('job output is stale; using KNMI directly');
   } catch (e) {
@@ -987,6 +1107,8 @@ async function update() {
   store.set('plan', plan);
   state.skill = plan.skill ?? null;
   state.compare = plan.compare ?? null;
+  state.sun = plan.sun ?? null;
+  syncSat(plan.sat);
   loadDwd(plan.dwd);
   if (plan.coverage) store.set('coverage', plan.coverage);
   state.coverage.knmi = plan.coverage ?? store.get('coverage');
@@ -1362,6 +1484,20 @@ function drawGraph(series) {
   }
   el('line', { x1: 0, x2: w, y1: base, y2: base, class: 'grid' }, graph);
 
+  // Measured sunshine over the past hour, along the top: yellow for sun,
+  // grey for cloud (nearest KNMI station).
+  const sun = sunSeries(state.point);
+  if (sun && state.frames.length) {
+    const xOf = (t) => (t - state.frames[0].t) / STEP * slot + slot / 2;
+    for (const { t, v } of sun.pts) {
+      const x0 = Math.max(0, xOf(t - 10 * 60e3)), x1 = Math.min(nowX - 4, xOf(t));
+      if (v == null || x1 <= x0) continue;
+      el('rect', { x: x0, y: 1, width: x1 - x0, height: 4, class: 'sun-cloud' }, graph);
+      el('rect', { x: x0, y: 1, width: x1 - x0, height: 4, class: 'sun', opacity: v }, graph);
+    }
+    el('text', { x: 0, y: 15, class: 'band' }, graph).textContent = `sunshine · ${sun.name}`;
+  }
+
   // Reliability strip under the forecast: solid where today's forecasts held
   // up, fading gradually as they held up less.
   if (conf.length) {
@@ -1535,7 +1671,8 @@ function drawReadout(series) {
   const dv = dwdSeries(state.point).get(fr[Math.round(state.pos)]?.t);
   const fmt = (x) => (x < WET ? 'dry' : `${x.toFixed(1)}\u00a0mm/h`);
   const other = (bv == null ? '' : ` · Buienradar ${fmt(bv)}`) + (dv == null || Math.round(state.pos) < state.nowIdx ? '' : ` · DWD ${fmt(dv)}`);
-  $('readout').textContent = `${when} · ${what}${sure}${other}`;
+  const sky = state.pos <= state.nowIdx ? sunWord(sunSeries(state.point), tm) : null;
+  $('readout').textContent = `${when} · ${what}${sky ? ` · ${sky}` : ''}${sure}${other}`;
 }
 
 // Scrub the shared timeline by dragging across the graph; it moves continuously.
@@ -1593,6 +1730,8 @@ addEventListener('resize', render);
 if (!gpu.ok) showStatus('This browser can’t draw the radar map (WebGL is unavailable).');
 state.mapSource = store.get('map') === 'dwd' ? 'dwd' : 'knmi';
 for (const b of document.querySelectorAll('.source button')) b.setAttribute('aria-pressed', String(b.dataset.src === state.mapSource));
+sat.on = store.get('clouds') === true;
+$('clouds').setAttribute('aria-pressed', String(sat.on));
 startLoading();
 locate();
 refresh();

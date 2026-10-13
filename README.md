@@ -19,6 +19,10 @@ with fake showery rain)
 - **Comparison lines:** Buienradar's and DWD's forecasts for the same spot.
 - **Head-to-head scores:** how often KNMI, Buienradar and DWD correctly forecast
   rain one hour ahead, over the last days.
+- **Sky:** measured sunshine over the past hour (nearest KNMI station) along the
+  top of the graph, and a "Clouds" satellite layer on the map (EUMETSAT
+  Meteosat, every 10 minutes, about half an hour behind): the difference
+  between a grey drizzly day and sun between showers, which radar can't show.
 - **Map:** KNMI radar by default; switch to DWD (all of Germany and surroundings).
   Areas without radar coverage are hatched; your country is subtly highlighted.
 
@@ -56,6 +60,9 @@ Buienradar ─────┘                    compare.json, coverage.json
 | [KNMI Data Platform](https://dataplatform.knmi.nl) | Radar observations (`nl_rdr_data_rtcor_5m`), 2-hour nowcast (`radar_forecast` v2.0, pySTEPS); WMS as fallback | CC BY 4.0 |
 | [DWD Open Data](https://opendata.dwd.de/weather/radar/composite/rv/) | RADVOR nowcast (`composite_rv`) for the comparison line and the DWD map | CC BY 4.0 |
 | [Buienradar](https://www.buienradar.nl) | Point forecast for the comparison line and scoring | Free use with credit and a link |
+| [EUMETSAT](https://view.eumetsat.int) | Satellite cloud images (MTG GeoColour) | Core data, CC BY 4.0: "Contains modified EUMETSAT Meteosat data" |
+| [KNMI Data Platform](https://dataplatform.knmi.nl) | 10-minute station observations (sunshine) | CC BY 4.0 |
+| [Open-Meteo](https://open-meteo.com) | Weather models' sun forecasts, scored by the job (not shown yet) | CC BY 4.0 |
 | [Natural Earth](https://www.naturalearthdata.com) | Country highlight, borders and coasts | Public domain |
 | Esri, HERE, Garmin, © OpenStreetMap contributors | Basemap tiles (Esri World Gray Canvas) | Esri basemap terms |
 

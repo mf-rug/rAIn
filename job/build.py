@@ -24,6 +24,7 @@ from PIL import Image
 from pyproj import Transformer
 
 import dwd
+import sky
 from compare import Compare
 from verify import Verifier
 
@@ -307,9 +308,28 @@ def main():
     except Exception as e:
         print("dwd unavailable:", e)
 
+    # The sky between the rain (job/sky.py): satellite images for the map's
+    # past hour, stations' measured sunshine, and scores of models' sun
+    # forecasts. Optional, like DWD.
+    try:
+        sat = sky.satellite(OUT, old.get("sat", []), t0 - PAST * STEP - sky.SAT_STEP)
+    except Exception as e:
+        print("satellite unavailable:", e)
+        sat = []
+    sky_state = sky.Sky(OUT, download)
+    now = datetime.now(timezone.utc)
+    for step in (sky_state.update_stations, sky_state.update_forecasts, sky_state.score):
+        try:
+            step(now)
+        except Exception as e:
+            print(f"sky {step.__name__}:", e)
+    sky_state.save(now)
+
     index = {"generated": iso(datetime.now(timezone.utc)), "t0": iso(t0), "ref": iso(ref), "obs": obs, "fc": fc}
     if dwd_meta:
         index["dwd"] = dwd_meta
+    if sat:
+        index["sat"] = sat
     (OUT / "index.json").write_text(json.dumps(index, separators=(",", ":")))
 
     # KNMI vs Buienradar (vs DWD): store the forecasts as they stand now, then
@@ -333,7 +353,8 @@ def main():
     if dwd_meta:
         keep |= {dwd_meta["fc"]} | {e["file"] for e in dwd_meta["obs"]}
         keep |= set(dwd_meta.get("map", {}).get("fc", [])) | {e["file"] for e in dwd_meta.get("map", {}).get("obs", [])}
-    for p in OUT.glob("*.png"):
+    keep |= {e["file"] for e in sat if "file" in e}
+    for p in [*OUT.glob("*.png"), *OUT.glob("*.jpg")]:
         if p.name not in keep:
             p.unlink()
     finish(True, f"t0 {index['t0']} ref {index['ref']} frames {len(obs) + len(fc)}; "
