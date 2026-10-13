@@ -1036,7 +1036,7 @@ for (const b of document.querySelectorAll('.source button')) {
 // ---------- sky: clouds from satellite, and measured sunshine ----------
 // Radar only sees falling rain: a grey drizzly day and a sunny day with passing
 // showers can look the same on it. job/sky.py publishes a cloud field from
-// satellite (every 15 minutes, ~25–45 minutes behind) and KNMI stations'
+// satellite (every 10 minutes, ~10–20 minutes behind) and KNMI stations'
 // sunshine minutes over the last hour.
 
 map.createPane('sat');
@@ -1044,7 +1044,7 @@ map.getPane('sat').style.zIndex = 300;   // over the basemap, under the veil and
 map.getPane('sat').style.pointerEvents = 'none';
 const sat = { on: false, list: [], motion: null, bounds: null, r: null, overlay: null, textures: new Map() };
 
-// Cloud fields (job/sky.py): one grid for a wide area, every 15 minutes, each
+// Cloud fields (job/sky.py): one grid for a wide area, every 10 minutes, each
 // with its motion towards the next; the newest drifts on along the latest
 // motion (a short cloud forecast). Drawn here, the same way day and night.
 function syncSat(block) {

@@ -47,7 +47,7 @@ does and the data sources. This file is about how it's built and what bites.
   toggle Both | KNMI | DWD changes only the map. verify.py scores the merged
   forecast (backfilled runs are still KNMI-only).
 - **Sky files:** `cloud-{t}.webp` (cloud field 0..255, one grid ~25°W–40°E /
-  34–66°N, 1200×969, every 15 min), `cloud-flow-{t}-{next}.png` (motion to the
+  34–66°N, 1200×969, every 10 min; 15 with the WMS fallback), `cloud-flow-{t}-{next}.png` (motion to the
   next field) and `cloud-motion-{t}.png` (mean of the last two, for the drift);
   `index.json` → `clouds` {bbox, frames, motion}. `sun.json` (stations' 10-min
   sunshine minutes, cloud okta, weather code for the last hour), `sky.json`
@@ -90,17 +90,30 @@ does and the data sources. This file is about how it's built and what bites.
 - **Clouds are drawn from a cloud field, not the satellite photo** (rebuilt
   2026-10-13). Animating GeoColour moved clouds and ground together (city
   lights and coasts dragged, low clouds stuck, seams between image tiers), and
-  every fix was a heuristic with failure cases, by day too. Now: EUMETSAT's
-  cloud mask (`msg_fes:clm`: white = cloud; catches low cloud/fog that
-  infrared misses: 137 vs 75 of 184 overcast station-times) × infrared
-  shading (`mtg_fd:ir105_hrfi`, grey 52→70), every 15 min on one grid; the
-  app colours it (grey low → white high, per theme). Night detection is weaker
-  for any method (mask: 35 of 67 overcast). Drift beats frozen only modestly
+  every fix was a heuristic with failure cases, by day too. Now: a cloud
+  mask (catches low cloud/fog that infrared misses: 137 vs 75 of 184
+  overcast station-times) × infrared shading (`mtg_fd:ir105_hrfi`, grey
+  52→70) on one grid; the app colours it (grey low → white high, per theme).
+  Drift beats frozen only modestly
   (60 min: 10.2% vs 10.9% wrong), as much change is cloud forming/dissolving.
+- **The mask is MTG's own (FCI-2-CLM) from EUMETSAT's Data Store** (since
+  2026-10-13; secrets `EUMETSAT_KEY`/`EUMETSAT_SECRET`), every 10 min,
+  published ~10 min after its slot; frames are labelled with the slot's end
+  (NL is scanned near the end). Station check, 679 station-times on
+  2026-10-13: correlation 0.82 vs 0.73 for MSG's WMS mask (`msg_fes:clm`) and
+  0.69 for MSG Rapid Scan's; night: 42/73 overcast caught, 8/132 clear called
+  cloudy (MSG 38, 16). Classes: 2 = partial/thin (density 0.8), 3 = opaque;
+  opaque alone misses half the overcast. **The file's x attributes are wrong
+  in sign:** columns run west → east (checked on the day/night boundary);
+  reading them as stated gave correlation ~0. The WMS still lags the Data
+  Store by ~20 min, so the infrared (WMS only) is the newest available at
+  first and the field is redone when its own arrives (`ir` in the entry).
+  Without the secrets, or when the Data Store fails, the job falls back to
+  MSG's WMS mask (15 min, ~25–45 min late).
 - **EUMETSAT's WMS snaps any time to the nearest image** (`nearestValue="1"`,
   no warning header) and returns an old default without a time: the newest
   real time comes from the layer's own capabilities; a frame whose mask equals
-  its neighbour's (hash `m`) is a gap. Images arrive ~25–45 min late; the
+  its neighbour's (hash `m`) is a gap. WMS images arrive ~25–45 min late; the
   service is throttled at 20 requests/min (the job fetches, not the app).
 - **Cloud motion:** optical flow needs texture; a uniform deck only moves at
   its edges (fronts got squashed), hence CLAHE first and texture-weighted
@@ -137,6 +150,9 @@ does and the data sources. This file is about how it's built and what bites.
   a fine-grained GitHub token (Actions read/write on this repo only).
   **The token expires 2027-10-10** — renew it and update the cron job, or runs
   fall back to GitHub's late 15-minute schedule.
+- **Repository secrets `EUMETSAT_KEY` / `EUMETSAT_SECRET`:** Data Store API
+  key (free EUMETSAT account) for MTG's cloud mask. Locally: `.secrets/eumetsat`
+  (key, secret on two lines; gitignored).
 - **Repository secret `KNMI_API_KEY`:** registered KNMI Open Data key (1000
   requests/hour). Without it the job uses KNMI's shared anonymous key (published
   by KNMI, valid until 2027-08-01), which is often rate limited.
@@ -147,23 +163,17 @@ does and the data sources. This file is about how it's built and what bites.
 
 ## Status and open threads (as of 2026-10-13)
 
-- **Next up: MTG's own cloud mask (EUMETSAT product FCI-2-CLM)** to replace
-  the MSG mask (`msg_fes:clm`, 15 min, ~5 km over NL) in the cloud field:
-  10 min, ~2 km at nadir, newer instrument (possibly better low cloud at
-  night: unverified). Not in the public WMS, only in EUMETSAT's Data Store:
-  needs a free account + API key (repo secret), files in the satellite's
-  geostationary projection (reproject in the job, like dwd.py). First check:
-  its latency (MSG mask is ~25–45 min), quality vs station okta (same method
-  as the 2026-10-13 check: mask 137/184 overcast caught, night 35/67), effort.
-- **Later options for clouds** (discussed, not started): KNMI's MSG-CPP
-  (near-real-time cloud properties, e.g. optical thickness, for shading);
-  Meteosat Rapid Scan (5 min over Europe; a ready-made cloud mask at that
-  rate is unconfirmed); neighbouring countries' station cloud cover (DWD
+- **Clouds now come from MTG's mask** (see above; switched 2026-10-13, one
+  day of station checks, mostly overcast: re-check on a clear and a mixed
+  day). Later options (not started): shading from cloud-top height instead
+  of the late WMS infrared (MSG CTH in the Data Store: 0.5 MB, ~14 min; MTG's
+  is 83 MB per slot); KNMI's MSG-CPP (cloud properties, e.g. optical
+  thickness); MSG Rapid Scan's mask (5 min, ~5 min late, 0.12 MB, but
+  scored below MTG and MSG 0° on the stations); neighbouring countries' station cloud cover (DWD
   10-min) to correct the satellite at night / validate; model cloud cover as
-  forecast beyond the drift (only if the sun scoring shows skill). None of
-  these removes the ~25–45 min satellite delay; the app drifts the newest
-  field to now ("drifted" label). EUMETSAT sometimes lacks a slot (20:30 on
-  2026-10-13 was a copy of 20:15) or answers 500; the job retries each run.
+  forecast beyond the drift (only if the sun scoring shows skill). The app
+  drifts the newest field to now ("drifted" label; ~10–20 min with MTG).
+  EUMETSAT's WMS sometimes lacks a slot or answers 500; the job retries each run.
 - **Merged is the default since 2026-10-13** (user's call, before the
   benchmark is in). Known cost: averaging spreads rain out (wider, weaker,
   earlier starts where the two disagree; 0.3 + 0 → 0.15 = the rain threshold).

@@ -3,20 +3,29 @@
 Radar only sees falling rain. A grey drizzly day and a sunny day with passing
 showers can look the same on it; the difference is in the clouds and the sun.
 
-Clouds: a cloud field (0 = clear … 1 = dense cloud) every 15 minutes for a wide
+Clouds: a cloud field (0 = clear … 1 = dense cloud) every 10 minutes for a wide
 area (~25°W–40°E, 34–66°N, one grid), which the app draws itself over the
 basemap, the same way day and night, and moves like the rain. Drawing the
 satellite picture (GeoColour) instead meant moving clouds and ground together:
 city lights and coasts got dragged, low clouds stuck, tiers showed seams.
-The field combines EUMETSAT's cloud mask (Meteosat 0°, a derived product: it
-catches low, warm clouds and fog that infrared alone misses) with Meteosat
-Third Generation's infrared (10.5 µm; colder = higher, denser cloud) for
-shading. Checked against KNMI stations' cloud cover, 2026-10-13 afternoon and
-evening (357 station-times): the mask caught 137 of 184 overcast moments,
-infrared alone 75; by night all methods are weaker (mask 35 of 67). Core data,
-CC BY 4.0, no key ("Contains modified EUMETSAT Meteosat data"). Requests need
-an explicit time (the service snaps any time to its nearest image and returns
-an old default without one); images appear ~25–45 minutes late.
+The field combines a cloud mask (a derived product: it catches low, warm
+clouds and fog that infrared alone misses) with Meteosat Third Generation's
+infrared (10.5 µm; colder = higher, denser cloud) for shading.
+
+The mask is MTG's own (FCI-2-CLM, every 10 minutes, ~2 km at nadir), from
+EUMETSAT's Data Store (needs a free account: EUMETSAT_KEY / EUMETSAT_SECRET),
+published ~10 minutes after its slot. Checked against KNMI stations' cloud
+cover on 2026-10-13, 08:30–21:00 (679 station-times): correlation 0.82, vs
+0.73 for Meteosat 0°'s mask (msg_fes:clm) and 0.69 for its Rapid Scan mask;
+by night it caught 42 of 73 overcast moments and called 8 of 132 clear ones
+cloudy (MSG: 38 and 16). Without the key, or when the Data Store fails, the
+job falls back to MSG's mask from the public WMS (every 15 minutes, images
+~25–45 minutes late: the WMS lags the Data Store by ~20 minutes). The WMS
+needs an explicit time (it snaps any time to its nearest image and returns an
+old default without one). Infrared comes from the WMS only, so the newest
+fields are first shaded with the newest infrared available and shaded again
+once their own arrives. Core data, CC BY 4.0 ("Contains modified EUMETSAT
+Meteosat data").
 
 Stations: KNMI's 10-minute observations (sunshine minutes, cloud cover, weather
 code) at ~32 Dutch stations, for the measured past hour on the app's sun band.
@@ -33,10 +42,14 @@ State in OUT/state/sky.json; for the app OUT/sun.json (stations, past hour)
 and the cloud fields; the scores in OUT/sky.json.
 """
 
+import base64
+import hashlib
 import io
 import json
 import math
+import os
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
@@ -50,7 +63,16 @@ IR_LAYER = "mtg_fd:ir105_hrfi"
 IR_CLEAR, IR_CLOUD = 52, 70          # grey levels of the service's IR rendering (clear 37–52, cloud ≥ ~50)
 CLOUD_BBOX = (-2782987, 4028802, 4452780, 9876846)   # Web Mercator, ~25°W–40°E, 34–66°N
 CLOUD_W, CLOUD_H = 1200, 969         # ~6 Mercator km per pixel (~3.7 km on the ground here)
-CLOUD_STEP = timedelta(minutes=15)   # the mask's rhythm; the nearest infrared is ≤ 5 min off
+CLOUD_STEP = timedelta(minutes=10)   # MTG's rhythm (the WMS fallback: 15 minutes)
+WMS_STEP = timedelta(minutes=15)
+DS = "https://api.eumetsat.int"
+MTG_CLM = "EO:EUM:DAT:0678"          # FCI-2-CLM, netCDF, full disc
+# cloud_state classes (enum in the file): 0 not processed, 1 cloud free,
+# 2 cloud contaminated (partial or thin), 3 cloud filled (opaque), 4..9 dust,
+# ash, snow/ice, undefined. Partial cloud counts as cloud, a bit thinner:
+# against the stations, opaque alone caught only 219 of 475 overcast moments.
+MTG_DENSITY = np.array([0, 0, 0.8, 1, 0, 0, 0, 0, 0, 0], np.float32)
+MTG_N = 5568                         # columns and rows of the 2 km grid
 CLOUD_LOW = 0.55                     # a cloudy pixel's least density (warm, low cloud)
 SAT_BUDGET = 60                      # seconds per run for satellite requests
 # Cloud motion between consecutive fields: optical flow (OpenCV Farnebäck) on
@@ -118,35 +140,168 @@ def wms(layer, t, fmt):
     return body
 
 
+def shade(cloud, ir):
+    """Cloudiness 0..1 × infrared grey levels (None: no infrared) → field 0..1."""
+    dense = 0.5 * cloud if ir is None else np.clip((ir - IR_CLEAR) / (IR_CLOUD - IR_CLEAR), 0, 1)
+    return np.clip(cloud * (CLOUD_LOW + (1 - CLOUD_LOW) * dense), 0, 1)
+
+
+def infrared(t):
+    return np.asarray(Image.open(io.BytesIO(wms(IR_LAYER, t, "image/jpeg"))).convert("L"), np.float32)
+
+
 def cloud_field(t):
-    """→ (field 0..1 as float array, the mask image's bytes) for time t."""
+    """MSG mask from the WMS → (field 0..1 as float array, the mask image's bytes) for time t."""
     mask_png = wms(MASK_LAYER, t, "image/png")
     ir_t = t - timedelta(minutes=5) if t.minute % 10 == 5 else t      # infrared every 10 min
-    ir = np.asarray(Image.open(io.BytesIO(wms(IR_LAYER, ir_t, "image/jpeg"))).convert("L"), np.float32)
     c = np.asarray(Image.open(io.BytesIO(mask_png)).convert("RGB")).astype(np.int16)
     mask = ((c[..., 0] > 200) & (c[..., 1] > 200) & (c[..., 2] > 200)).astype(np.float32)
     mask = cv2.GaussianBlur(mask, (0, 0), 1.0)                        # the mask is blocky (~5 km here)
-    dense = np.clip((ir - IR_CLEAR) / (IR_CLOUD - IR_CLEAR), 0, 1)
-    return np.clip(mask * (CLOUD_LOW + (1 - CLOUD_LOW) * dense), 0, 1), mask_png
+    return shade(mask, infrared(ir_t)), mask_png
+
+
+# ----- MTG's mask from the Data Store -----
+
+_token = {"value": None, "until": 0.0}
+
+
+def ds_token():
+    import time
+    if time.time() > _token["until"]:
+        auth = base64.b64encode(f"{os.environ['EUMETSAT_KEY']}:{os.environ['EUMETSAT_SECRET']}".encode()).decode()
+        req = urllib.request.Request(f"{DS}/token", data=b"grant_type=client_credentials",
+                                     headers={"Authorization": "Basic " + auth})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            tok = json.load(r)
+        _token.update(value=tok["access_token"], until=time.time() + tok["expires_in"] - 60)
+    return _token["value"]
+
+
+def mtg_slots(oldest):
+    """{field time (the slot's end; the Netherlands is scanned near the end of
+    the slot): netCDF download URL} for MTG masks since oldest."""
+    q = urllib.parse.urlencode({"format": "json", "pi": MTG_CLM, "dtstart": iso(oldest - CLOUD_STEP), "c": 100})
+    with urllib.request.urlopen(f"{DS}/data/search-products/1.0.0/os?{q}", timeout=20) as r:
+        feats = json.load(r)["features"]
+    slots = {}
+    for f in feats:
+        end = parse(f["properties"]["date"].split("/")[1])
+        nc = [e["href"] for e in f["properties"]["links"]["sip-entries"] if e["title"].endswith(".nc")]
+        if nc and end >= oldest:
+            slots[iso(end)] = nc[0]
+    return slots
+
+
+_lut = {}
+
+
+def mtg_lut():
+    """Cloud grid → MTG grid: (window rows, window cols, map x, map y) for cv2.remap."""
+    if not _lut:
+        import pyproj
+        h = 35786400.0
+        tr = pyproj.Transformer.from_crs("EPSG:3857", pyproj.CRS.from_proj4(
+            f"+proj=geos +h={h} +lon_0=0 +sweep=y +a=6378137 +b=6356752 +units=m"), always_xy=True)
+        x0, y0, x1, y1 = CLOUD_BBOX
+        mx = x0 + (np.arange(CLOUD_W) + 0.5) * (x1 - x0) / CLOUD_W
+        my = y1 - (np.arange(CLOUD_H) + 0.5) * (y1 - y0) / CLOUD_H
+        gx, gy = np.meshgrid(mx, my)
+        X, Y = tr.transform(gx, gy)
+        # The file's x attributes (scale -5.5888e-5 rad, offset 0.15562) would
+        # put the columns east → west; they are stored west → east (checked on
+        # the day/night boundary). Rows run south → north.
+        step = 5.5887776e-05
+        col = (np.asarray(X) / h + 0.15561952) / step - 1     # index v = 1..N at v * step - 0.15562
+        row = (np.asarray(Y) / h + 0.15561952) / step - 1
+        col, row = col.astype(np.float32), row.astype(np.float32)
+        ok = np.isfinite(col) & np.isfinite(row)
+        r0, r1 = int(np.nanmin(row[ok])) - 2, int(np.nanmax(row[ok])) + 3
+        c0, c1 = int(np.nanmin(col[ok])) - 2, int(np.nanmax(col[ok])) + 3
+        r0, c0, r1, c1 = max(r0, 0), max(c0, 0), min(r1, MTG_N), min(c1, MTG_N)
+        col[~ok] = -10; row[~ok] = -10
+        _lut.update(rows=slice(r0, r1), cols=slice(c0, c1), mx=col - c0, my=row - r0)
+    return _lut
+
+
+def mtg_cloud(url):
+    """Cloudiness 0..1 on the cloud grid from one MTG mask file."""
+    import h5py
+    req = urllib.request.Request(url, headers={"Authorization": "Bearer " + ds_token()})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        body = r.read()
+    lut = mtg_lut()
+    with h5py.File(io.BytesIO(body)) as f:
+        cls = f["cloud_state"][lut["rows"], lut["cols"]].astype(np.int16)
+    d = MTG_DENSITY[np.clip(cls, 0, 9)]
+    d = cv2.GaussianBlur(d, (0, 0), 0.8)                              # 2 km pixels → ~3.7 km cells
+    return cv2.remap(d, lut["mx"], lut["my"], cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+
+
+def clouds_mtg(out, have, oldest, start):
+    """Adds MTG fields to have (dict by time). The newest are shaded with the
+    newest infrared there is ("ir" < their slot's start) and redone once
+    their own is out. Returns True if any field changed."""
+    slots = mtg_slots(oldest)
+    try:
+        ir_newest = layer_latest(IR_LAYER)
+    except Exception as e:
+        print("infrared unavailable:", e)
+        ir_newest = None
+    changed = False
+    for ts in sorted(slots, reverse=True):
+        if (datetime.now(timezone.utc) - start).total_seconds() > SAT_BUDGET:
+            break
+        t = parse(ts)
+        want = t - CLOUD_STEP                                         # infrared of the same slot
+        ir_t = None if ir_newest is None else min(want, floor(ir_newest, CLOUD_STEP))
+        if ir_t is not None and want - ir_t > timedelta(minutes=30):
+            ir_t = None
+        e = have.get(ts)
+        if e and e.get("src") == "mtg" and e.get("ir") in (iso(want), iso(ir_t) if ir_t else None):
+            continue                                                  # done, or no better infrared yet
+        try:
+            field = shade(mtg_cloud(slots[ts]), infrared(ir_t) if ir_t else None)
+            name = f"cloud-{t:%Y%m%d%H%M}.webp"
+            Image.fromarray((field * 255).astype(np.uint8), "L").save(out / name, quality=60)
+            have[ts] = {"t": ts, "file": name, "m": hashlib.md5(slots[ts].encode()).hexdigest()[:12], "src": "mtg",
+                        "ir": iso(ir_t) if ir_t else None}
+            before = [k for k in have if k < ts]
+            if e and before:
+                have[max(before)].pop("flow", None)                   # its motion towards this field
+            changed = True
+            print("clouds", ts, "infrared", iso(ir_t) if ir_t else "none")
+        except Exception as ex:   # retried next run
+            print("clouds failed", ts, getattr(ex, "code", ex))
+    return changed
 
 
 def clouds(out, old, oldest):
-    """Cloud fields from oldest to the newest out, one per 15 minutes.
-    Returns [{"t", "file", "m"}] (m: a hash of the mask image); entries with
-    "gap" mark times without a mask of their own. The service answers any time
+    """Cloud fields from oldest to the newest out: MTG's mask from the Data
+    Store when there's a key, else (or when it fails) MSG's from the WMS.
+    Returns [{"t", "file", "m"}] (m: identifies the mask image); entries with
+    "gap" mark WMS times without a mask of their own. The WMS answers any time
     with its nearest image, so a copy of a neighbour's mask is a gap (kept, so
     it isn't asked for again, except at the newest end: retried next run)."""
-    import hashlib
     have = {e["t"]: e for e in old if e["t"] >= iso(oldest) and (e.get("gap") or (out / e.get("file", "")).exists())}
     real = [t for t, e in have.items() if not e.get("gap")]
     have = {t: e for t, e in have.items() if not e.get("gap") or (real and t < max(real))}
+    start = datetime.now(timezone.utc)
+    if os.environ.get("EUMETSAT_KEY") and os.environ.get("EUMETSAT_SECRET"):
+        try:
+            if clouds_mtg(out, have, oldest, start):
+                for f in out.glob("cloud-motion-*.png"):              # a field changed: redo the drift motion
+                    f.unlink()
+            entries = sorted(have.values(), key=lambda e: e["t"])
+            if any(e.get("src") == "mtg" for e in entries):
+                return entries
+        except Exception as e:
+            print("MTG clouds unavailable, falling back to the WMS:", e)
     try:
         newest = min(layer_latest(MASK_LAYER), layer_latest(IR_LAYER) + timedelta(minutes=5))
     except Exception as e:
         print("clouds unavailable:", e)
         return sorted(have.values(), key=lambda e: e["t"])
-    t = floor(newest, CLOUD_STEP)
-    start = datetime.now(timezone.utc)
+    t = floor(newest, WMS_STEP)
     while t >= oldest and (datetime.now(timezone.utc) - start).total_seconds() < SAT_BUDGET:
         if iso(t) not in have:
             try:
@@ -157,7 +312,7 @@ def clouds(out, old, oldest):
                 print("clouds", iso(t))
             except Exception as ex:   # retried next run
                 print("clouds failed", iso(t), getattr(ex, "code", ex))
-        t -= CLOUD_STEP
+        t -= WMS_STEP
     entries = sorted(have.values(), key=lambda e: e["t"])
     prev = None
     for k, e in enumerate(entries):

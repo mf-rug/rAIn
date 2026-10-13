@@ -53,6 +53,8 @@ jobs:
         timeout-minutes: 6
         env:
           KNMI_API_KEY: ${{ secrets.KNMI_API_KEY }}
+          EUMETSAT_KEY: ${{ secrets.EUMETSAT_KEY }}
+          EUMETSAT_SECRET: ${{ secrets.EUMETSAT_SECRET }}
 
       # A single commit, replaced each time, so the repo doesn't grow.
       - name: Store frames

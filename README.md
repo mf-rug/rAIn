@@ -24,8 +24,8 @@ with fake showery rain)
   rain one hour ahead, over the last days.
 - **Sky:** measured sunshine over the past hour (nearest KNMI station) along the
   top of the graph, and a "Clouds" layer on the map: where it's cloudy, from
-  satellite (EUMETSAT's cloud mask and infrared, every 15 minutes, about half
-  an hour behind), moving with the wind into the forecast. The difference
+  satellite (EUMETSAT's cloud mask from Meteosat Third Generation and
+  infrared, every 10 minutes, 10–20 minutes behind), moving with the wind into the forecast. The difference
   between a grey drizzly day and sun between showers, which radar can't show.
 - **Map:** the merged radar by default; switch to KNMI alone or DWD alone (all
   of Germany and surroundings).
@@ -65,7 +65,7 @@ Buienradar ─────┘                    compare.json, coverage.json
 | [KNMI Data Platform](https://dataplatform.knmi.nl) | Radar observations (`nl_rdr_data_rtcor_5m`), 2-hour nowcast (`radar_forecast` v2.0, pySTEPS); WMS as fallback | CC BY 4.0 |
 | [DWD Open Data](https://opendata.dwd.de/weather/radar/composite/rv/) | RADVOR nowcast (`composite_rv`) for the comparison line and the DWD map | CC BY 4.0 |
 | [Buienradar](https://www.buienradar.nl) | Point forecast for the comparison line and scoring | Free use with credit and a link |
-| [EUMETSAT](https://view.eumetsat.int) | Cloud mask (Meteosat) and infrared (MTG) for the cloud layer | Core data, CC BY 4.0: "Contains modified EUMETSAT Meteosat data" |
+| [EUMETSAT](https://view.eumetsat.int) | Cloud mask (MTG, from the Data Store; free account) and infrared (MTG, WMS) for the cloud layer | Core data, CC BY 4.0: "Contains modified EUMETSAT Meteosat data" |
 | [KNMI Data Platform](https://dataplatform.knmi.nl) | 10-minute station observations (sunshine) | CC BY 4.0 |
 | [Open-Meteo](https://open-meteo.com) | Weather models' sun forecasts, scored by the job (not shown yet) | CC BY 4.0 |
 | [Natural Earth](https://www.naturalearthdata.com) | Country highlight, borders and coasts | Public domain |
