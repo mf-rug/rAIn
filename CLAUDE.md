@@ -101,7 +101,14 @@ does and the data sources. This file is about how it's built and what bites.
   deck has no texture for optical flow: only its edges moved and drifted
   fronts got squashed along the wind. Hence CLAHE before the flow and
   texture-weighted filling (`FLOW_FILL`); bump `FLOW_VERSION` when the method
-  changes so all fields are recomputed (file names carry it). Throttled at 20
+  changes so all fields are recomputed (file names carry it).
+- **Drift moves only the clouds** (`sat-{cloud,alpha,bg}-{tier}-{t}.jpg` for
+  the newest image, `index.json` → `sat_drift`): drifting the whole picture
+  slid city lights across the map at night and pulled the image edge loose.
+  Cloud mask from infrared (`mtg_fd:ir105_hrfi`, grey 52→70); night clouds
+  coloured from infrared; GeoColour turns to its night look well before
+  sunset (dark at 2–8° sun height), hence night = sun below 6–14°. The app
+  blends from the plain drift to the split one over the first 20 minutes. Throttled at 20
   requests/min, which is why the job fetches, not the app.
 - **Weather models' sun at a point was poor on the first check** (2026-10-13:
   HARMONIE missed a sunny afternoon in the south, correlation ~0 with the

@@ -323,6 +323,11 @@ def main():
     except Exception as e:
         print("cloud motion unavailable:", e)
         motion = {}
+    try:
+        drift = sky.sat_drift(OUT, sat) if motion else {}
+    except Exception as e:
+        print("drift layers unavailable:", e)
+        drift = {}
     sky_state = sky.Sky(OUT, download)
     now = datetime.now(timezone.utc)
     for step in (sky_state.update_stations, sky_state.update_forecasts, sky_state.score):
@@ -357,6 +362,8 @@ def main():
         index["sat_tiers"] = {k: list(bbox) for k, (bbox, _, _) in sky.TIERS.items()}
         if motion:
             index["sat_motion"] = motion
+        if drift:
+            index["sat_drift"] = drift
     (OUT / "index.json").write_text(json.dumps(index, separators=(",", ":")))
 
     # KNMI vs Buienradar (vs DWD): store the forecasts as they stand now, then
@@ -383,7 +390,7 @@ def main():
     keep |= {e[k] for e in sat for k in ("file", *sky.TIERS) if k in e}
     if mix_block:
         keep |= {e["file"] for e in mix_block["obs"] + mix_block["fc"]} | {mix_block["knmi_win"]}
-    keep |= {f for e in sat for f in (e.get("flow") or {}).values()} | set(motion.values())
+    keep |= {f for e in sat for f in (e.get("flow") or {}).values()} | set(motion.values()) | {f for d in drift.values() for f in d.values()}
     for p in [*OUT.glob("*.png"), *OUT.glob("*.jpg")]:
         if p.name not in keep:
             p.unlink()

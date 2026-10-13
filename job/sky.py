@@ -220,6 +220,81 @@ def load_flow(path):
     return (np.asarray(Image.open(path), np.float32)[..., :2] - 128) / FLOW_SCALE
 
 
+# For drifting the newest image forward, only its clouds should move: the
+# ground (coasts, fields, and at night the city lights GeoColour shows) stays
+# put. Infrared (10.5 µm, the same by day and night; cold = cloud) gives the
+# cloud mask. The moving clouds are the picture by day and, at night (by the
+# sun's height), coloured from the infrared, which has no city lights in it.
+# The fixed background: the picture where it's clear; under clouds a blur of
+# the clear parts around, or the cloud itself where no clear sky is near (it
+# then stays put rather than leaving a hole).
+IR_LAYER = "mtg_fd:ir105_hrfi"
+IR_CLEAR, IR_CLOUD = 52, 70      # grey levels of the service's IR rendering (2026-10-13: clear 37–52, cloud ≥ ~50, median 66)
+BG_SIGMA = 12                    # px, at the image's half size
+
+
+def drift_layers(out, e, key, bbox, w, h):
+    """→ {"cloud", "alpha", "bg"} file names for image e of a tier (made once)."""
+    t = parse(e["t"])
+    names = {k: f"sat-{k}-{key}-{t:%Y%m%d%H%M}.jpg" for k in ("cloud", "alpha", "bg")}
+    if all((out / n).exists() for n in names.values()):
+        return names
+    q = (f"service=WMS&version=1.3.0&request=GetMap&layers={IR_LAYER}&styles=&crs=EPSG:3857"
+         f"&bbox={','.join(str(v) for v in bbox)}&width={w // 2}&height={h // 2}&format=image/jpeg&time={iso(t)}")
+    with urllib.request.urlopen(f"{SAT_WMS}?{q}", timeout=20) as r:
+        if not r.headers.get("Content-Type", "").startswith("image/"):
+            raise ValueError(r.headers.get("Content-Type"))
+        ir = np.asarray(Image.open(io.BytesIO(r.read())).convert("L"), np.float32)
+    img = np.asarray(Image.open(out / e[key]).convert("RGB").resize((w // 2, h // 2), Image.BILINEAR), np.float32)
+    cloud = np.clip((ir - IR_CLEAR) / (IR_CLOUD - IR_CLEAR), 0, 1)
+    # Night from the sun's height at each pixel (GeoColour switches to its
+    # night look well before sunset; 2026-10-13 it was dark at 2–8°): 1 below
+    # 6°, 0 above 14°.
+    xs = bbox[0] + (np.arange(w // 2) + 0.5) * (bbox[2] - bbox[0]) / (w // 2)
+    ys = bbox[3] - (np.arange(h // 2) + 0.5) * (bbox[3] - bbox[1]) / (h // 2)
+    lon = xs / 20037508.34 * 180
+    lat = np.degrees(2 * np.arctan(np.exp(ys / 6378137)) - np.pi / 2)
+    d = t.timetuple().tm_yday
+    decl = np.radians(23.44) * np.sin(2 * np.pi / 365 * (d - 81))
+    ha = np.radians((t.hour + t.minute / 60 + lon[None, :] / 15 - 12) * 15)
+    la = np.radians(lat)[:, None]
+    elev = np.degrees(np.arcsin(np.sin(la) * np.sin(decl) + np.cos(la) * np.cos(decl) * np.cos(ha)))
+    night = np.clip((14 - elev) / 8, 0, 1)[..., None].astype(np.float32)
+    # The moving clouds: by day the picture itself; at night coloured from the
+    # infrared (as GeoColour draws night clouds), which has no city lights in it.
+    v = np.clip((ir - IR_CLEAR) / (130 - IR_CLEAR), 0, 1)[..., None]
+    ir_rgb = np.array([30, 33, 40], np.float32) + v * np.array([105, 110, 120], np.float32)   # GeoColour's faint night clouds
+    no_lights = img * (1 - night) + ir_rgb * night
+    # Background: clear parts as they are; under clouds the clear surroundings, blurred.
+    clear = (1 - cloud)[..., None]
+    num = cv2.GaussianBlur(no_lights * clear, (0, 0), BG_SIGMA)
+    den = cv2.GaussianBlur(np.ascontiguousarray(clear[..., 0]), (0, 0), BG_SIGMA)[..., None]
+    under = np.where(den > 0.15, num / np.maximum(den, 1e-3), no_lights)
+    bg = img * clear + under * (1 - clear)             # clear parts keep their city lights
+    full = (w, h)
+    Image.fromarray(np.clip(no_lights, 0, 255).astype(np.uint8)).resize(full, Image.BILINEAR).save(out / names["cloud"], quality=75)
+    Image.fromarray((cloud * 255).astype(np.uint8), "L").save(out / names["alpha"], quality=85)
+    Image.fromarray(np.clip(bg, 0, 255).astype(np.uint8)).resize(full, Image.BILINEAR).save(out / names["bg"], quality=75)
+    return names
+
+
+def sat_drift(out, entries):
+    """Drift layers for the newest image of each tier: {tier: {"cloud", "alpha", "bg"}}."""
+    real = [e for e in entries if e.get("file")]
+    if not real:
+        return {}
+    res = {}
+    for key, (bbox, w, h) in tier_geometry().items():
+        e = real[-1]
+        if not e.get(key):
+            continue
+        try:
+            res[key] = drift_layers(out, e, key, bbox, w, h)
+        except Exception as ex:
+            print("drift layers failed", key, e["t"], getattr(ex, "code", ex))
+    return res
+
+
 def sat_motion(out, entries):
     """Adds each image's motion towards the next one ("flow": {tier: file})
     and returns the motion for drifting the newest image forward: the mean of
