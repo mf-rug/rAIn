@@ -80,7 +80,12 @@ does and the data sources. This file is about how it's built and what bites.
   radar area in detail plus coarser tiers of wider areas (`sky.TIERS`:
   `sat-wide-*` to ~10°W–25°E, `sat-outer-*` to ~25°W–40°E; bboxes in
   `index.json` → `sat_tiers`). The app loads a tier only when the map view
-  reaches beyond the finer one. Throttled at 20
+  reaches beyond the finer one.
+- **Cloud motion:** `sat-flow-{tier}-{t}.png` (per image, motion to the next
+  one) and `sat-motion-{tier}-{t}.png` (mean of the last two, for drifting
+  the newest image forward; `index.json` → `sat_motion`): 32×32 RGBA, R/G =
+  128 + 4 × pixels per 10 min. The app warps between images and traces the
+  drift back in 10-minute steps (a straight jump smears). Throttled at 20
   requests/min, which is why the job fetches, not the app.
 - **Weather models' sun at a point was poor on the first check** (2026-10-13:
   HARMONIE missed a sunny afternoon in the south, correlation ~0 with the

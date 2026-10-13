@@ -316,6 +316,11 @@ def main():
     except Exception as e:
         print("satellite unavailable:", e)
         sat = []
+    try:
+        motion = sky.sat_motion(OUT, sat)
+    except Exception as e:
+        print("cloud motion unavailable:", e)
+        motion = {}
     sky_state = sky.Sky(OUT, download)
     now = datetime.now(timezone.utc)
     for step in (sky_state.update_stations, sky_state.update_forecasts, sky_state.score):
@@ -331,6 +336,8 @@ def main():
     if sat:
         index["sat"] = sat
         index["sat_tiers"] = {k: list(bbox) for k, (bbox, _, _) in sky.TIERS.items()}
+        if motion:
+            index["sat_motion"] = motion
     (OUT / "index.json").write_text(json.dumps(index, separators=(",", ":")))
 
     # KNMI vs Buienradar (vs DWD): store the forecasts as they stand now, then
@@ -355,6 +362,7 @@ def main():
         keep |= {dwd_meta["fc"]} | {e["file"] for e in dwd_meta["obs"]}
         keep |= set(dwd_meta.get("map", {}).get("fc", [])) | {e["file"] for e in dwd_meta.get("map", {}).get("obs", [])}
     keep |= {e[k] for e in sat for k in ("file", *sky.TIERS) if k in e}
+    keep |= {f for e in sat for f in (e.get("flow") or {}).values()} | set(motion.values())
     for p in [*OUT.glob("*.png"), *OUT.glob("*.jpg")]:
         if p.name not in keep:
             p.unlink()

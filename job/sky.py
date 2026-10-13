@@ -33,6 +33,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
+import cv2
 import numpy as np
 from PIL import Image
 
@@ -49,6 +50,15 @@ TIERS = {
     "outer": ((-2782987, 4028802, 4452780, 9876846), 1000, 808),  # ≈25°W–40°E, 34–66°N, 7.2 km/px
 }
 SAT_BUDGET = 60                  # seconds per run for satellite requests
+# Cloud motion between consecutive images, per tier: optical flow (OpenCV
+# Farnebäck), reduced to a FLOW_GRID × FLOW_GRID field (block medians, 3×3
+# median filter, speed cap, light blur) in image pixels per 10 minutes. Tested
+# on 2026-10-13: drifting the newest image along the mean of the last two
+# fields beat a frozen image at 10–60 minutes (wrong cloud/clear pixels at
+# 60 min: 11.5% vs 16.9%).
+FLOW_GRID = 32
+FLOW_CAP_KM = 30                 # Mercator km per 10 minutes (~110 km/h on the ground here)
+FLOW_SCALE = 4                   # PNG byte steps per pixel (128 = no motion)
 
 STN = "10-minute-in-situ-meteorological-observations/versions/1.0"
 STN_STEP = timedelta(minutes=10)
@@ -153,6 +163,72 @@ def satellite(out, old, oldest):
                 return [x for x in entries[:k]]
         prev = body
     return entries
+
+
+def tier_geometry():
+    """key → (bbox, width, height) for every tier, the detailed one as "file"."""
+    return {"file": ((X0, Y0, X1, Y1), SAT_W, SAT_H), **TIERS}
+
+
+def flow_field(pa, pb, minutes, km_per_px):
+    """Cloud motion from image a to image b as a grid of (dx, dy) in pixels per 10 min."""
+    def grey(p, s):
+        im = Image.open(p).convert("L")
+        return np.asarray(im.resize((im.width // s, im.height // s), Image.BILINEAR))
+    s = 2 if km_per_px < 2 else 1          # the detailed tier is fine enough at half size
+    f = cv2.calcOpticalFlowFarneback(grey(pa, s), grey(pb, s), None, 0.5, 4, 21, 3, 7, 1.5, 0) * s * 10 / minutes
+    h, w = f.shape[:2]
+    g = np.zeros((FLOW_GRID, FLOW_GRID, 2), np.float32)
+    for j in range(FLOW_GRID):
+        for i in range(FLOW_GRID):
+            blk = f[j * h // FLOW_GRID:(j + 1) * h // FLOW_GRID, i * w // FLOW_GRID:(i + 1) * w // FLOW_GRID]
+            g[j, i] = np.median(blk.reshape(-1, 2), axis=0)
+    g = np.stack([cv2.medianBlur(np.ascontiguousarray(g[..., c]), 3) for c in range(2)], -1)
+    cap = FLOW_CAP_KM / km_per_px
+    speed = np.hypot(g[..., 0], g[..., 1])
+    g *= np.minimum(1, cap / np.maximum(speed, 1e-6))[..., None]
+    return cv2.GaussianBlur(g, (3, 3), 0)
+
+
+def save_flow(g, path):
+    rgba = np.zeros((*g.shape[:2], 4), np.uint8)
+    rgba[..., :2] = np.clip(np.round(128 + g * FLOW_SCALE), 0, 255)
+    rgba[..., 3] = 255
+    Image.fromarray(rgba, "RGBA").save(path, optimize=True)
+
+
+def load_flow(path):
+    return (np.asarray(Image.open(path), np.float32)[..., :2] - 128) / FLOW_SCALE
+
+
+def sat_motion(out, entries):
+    """Adds each image's motion towards the next one ("flow": {tier: file})
+    and returns the motion for drifting the newest image forward: the mean of
+    the last two fields ({tier: file}, or {})."""
+    real = [e for e in entries if e.get("file")]
+    motion = {}
+    for key, (bbox, w, h) in tier_geometry().items():
+        km = (bbox[2] - bbox[0]) / w / 1000
+        fields = []
+        for a, b in zip(real, real[1:]):
+            minutes = (parse(b["t"]) - parse(a["t"])).total_seconds() / 60
+            if not a.get(key) or not b.get(key) or minutes > 30:
+                continue
+            name = f"sat-flow-{key}-{a['t'][:16].replace('-', '').replace(':', '').replace('T', '')}.png"
+            if not (a.get("flow") or {}).get(key) or not (out / a["flow"][key]).exists():
+                try:
+                    save_flow(flow_field(out / a[key], out / b[key], minutes, km), out / name)
+                except Exception as ex:
+                    print("cloud motion failed", key, a["t"], ex)
+                    continue
+                a.setdefault("flow", {})[key] = name
+            fields.append(a["flow"][key])
+        if fields:
+            name = f"sat-motion-{key}-{real[-1]['t'][:16].replace('-', '').replace(':', '').replace('T', '')}.png"
+            if not (out / name).exists():
+                save_flow(np.mean([load_flow(out / f) for f in fields[-2:]], axis=0), out / name)
+            motion[key] = name
+    return motion
 
 
 # ---------- sun position ----------

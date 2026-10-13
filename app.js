@@ -911,71 +911,189 @@ for (const b of document.querySelectorAll('.source button')) {
 map.createPane('sat');
 map.getPane('sat').style.zIndex = 300;   // over the basemap, under the veil and the radar
 map.getPane('sat').style.pointerEvents = 'none';
-const sat = { list: [], tiers: [{ key: 'file', bounds: BOUNDS }], overlays: new Map(), on: false };
+const sat = { list: [], tiers: [], motion: [], on: false, textures: new Map() };
 
 // Each time has a detailed image of the radar's area and coarser ones of wider
-// areas ("tiers", finest first), each drawn under the finer one.
-function syncSat(list, tiers) {
+// areas ("tiers", finest first), each drawn under the finer one, plus the
+// cloud motion towards the next image (job/sky.py). Between images the clouds
+// move along it; after the newest image they keep drifting along the latest
+// motion (a short cloud forecast).
+function syncSat(list, tiers, motion) {
   const merc = (b) => L.latLngBounds(L.CRS.EPSG3857.unproject(L.point(b[0], b[1])), L.CRS.EPSG3857.unproject(L.point(b[2], b[3])));
-  sat.tiers = [{ key: 'file', bounds: BOUNDS }, ...Object.entries(tiers ?? {}).map(([key, b]) => ({ key, bounds: merc(b) }))];
+  const keys = ['file', ...Object.keys(tiers ?? {})];
+  if (keys.join() !== sat.tiers.map((t) => t.key).join()) {
+    for (const t of sat.tiers) t.overlay?.remove();
+    sat.tiers = keys.map((key) => ({ key, bounds: key === 'file' ? BOUNDS : merc(tiers[key]), r: null, overlay: null }));
+  }
+  const url = (f) => (f ? DATA + f : null);
   sat.list = (list ?? []).filter((e) => e.file).map((e) => ({
-    t: Date.parse(e.t), urls: sat.tiers.map((tier) => (e[tier.key] ? DATA + e[tier.key] : null)),
+    t: Date.parse(e.t),
+    urls: keys.map((k) => url(e[k])),
+    flows: keys.map((k) => url(e.flow?.[k])),
   }));
+  sat.motion = keys.map((k) => url(motion?.[k]));
   $('clouds').hidden = !sat.list.length;
-  const keep = new Set(sat.list.flatMap((e) => e.urls));
-  for (const [url, o] of sat.overlays) {
-    if (!keep.has(url)) { o.remove(); sat.overlays.delete(url); }
+  const keep = new Set([...sat.list.flatMap((e) => [...e.urls, ...e.flows]), ...sat.motion]);
+  for (const [u, x] of sat.textures) {
+    if (!keep.has(u)) { x.tier?.r?.drop(x.tex); sat.textures.delete(u); }
   }
   loadSat();
   requestDraw();
 }
 
+function makeSatRenderer() {
+  const canvas = document.createElement('canvas');
+  const gl = canvas.getContext('webgl', { premultipliedAlpha: true, alpha: true, antialias: false });
+  if (!gl) return null;
+  const compile = (type, src) => {
+    const sh = gl.createShader(type);
+    gl.shaderSource(sh, src); gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(sh));
+    return sh;
+  };
+  const prog = gl.createProgram();
+  gl.attachShader(prog, compile(gl.VERTEX_SHADER, `
+    attribute vec2 p;
+    varying vec2 uv;
+    void main() { uv = vec2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5); gl_Position = vec4(p, 0.0, 1.0); }`));
+  gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, `
+    precision highp float;
+    varying vec2 uv;
+    uniform sampler2D a, b, flow;
+    uniform float s, k, alpha;
+    uniform bool between;
+    uniform vec2 scale;
+    // Outside the image: transparent, so the coarser tier underneath shows.
+    vec4 at(sampler2D t, vec2 q) {
+      if (q.x < 0.0 || q.y < 0.0 || q.x > 1.0 || q.y > 1.0) return vec4(0.0);
+      return vec4(texture2D(t, q).rgb, 1.0);
+    }
+    vec2 motion(vec2 q) { return (texture2D(flow, q).rg - 128.0 / 255.0) * scale; }   // uv per 10 min
+    void main() {
+      vec4 c;
+      if (between) {
+        vec2 f = motion(uv) * k;   // over the step between the images
+        c = mix(at(a, uv - f * s), at(b, uv + f * (1.0 - s)), s);
+      } else {
+        // Drift: trace back along the motion in 10-minute steps (a straight
+        // jump smears where the motion varies).
+        vec2 q = uv;
+        float n = ceil(k), dk = k / max(n, 1.0);
+        for (int i = 0; i < 18; i++) {
+          if (float(i) >= n) break;
+          q -= motion(q) * dk;
+        }
+        c = at(a, q);
+      }
+      gl_FragColor = vec4(c.rgb * c.a, c.a) * alpha;
+    }`));
+  gl.linkProgram(prog);
+  gl.useProgram(prog);
+  gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+  const loc = gl.getAttribLocation(prog, 'p');
+  gl.enableVertexAttribArray(loc);
+  gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+  gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.NONE);   // motion values are raw bytes
+  const u = (n) => gl.getUniformLocation(prog, n);
+  gl.uniform1i(u('a'), 0); gl.uniform1i(u('b'), 1); gl.uniform1i(u('flow'), 2);
+  const texture = (src) => {
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    for (const [p, v] of [[gl.TEXTURE_MIN_FILTER, gl.LINEAR], [gl.TEXTURE_MAG_FILTER, gl.LINEAR], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]]) gl.texParameteri(gl.TEXTURE_2D, p, v);
+    if (src instanceof Uint8Array) gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, src);
+    else gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, src);
+    return tex;
+  };
+  const still = texture(new Uint8Array([128, 128, 0, 255]));
+  return {
+    canvas,
+    texture,
+    drop: (tex) => tex && gl.deleteTexture(tex),
+    // a, b: image textures; flow: motion per 10 minutes (null = none); s: 0..1
+    // between a and b; k: the step in tens of minutes.
+    draw({ a, b, flow, s = 0, k = 0, alpha = 1, w, h }) {
+      if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; gl.viewport(0, 0, w, h); }
+      gl.clearColor(0, 0, 0, 0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      if (!a) return;
+      const bind = (unit, tex) => { gl.activeTexture(gl.TEXTURE0 + unit); gl.bindTexture(gl.TEXTURE_2D, tex); };
+      bind(0, a); bind(1, b || a); bind(2, flow || still);
+      // Motion bytes: 128 = none, 4 steps per image pixel.
+      gl.uniform2f(u('scale'), 255 / 4 / w, 255 / 4 / h);
+      gl.uniform1f(u('s'), s); gl.uniform1f(u('k'), k); gl.uniform1f(u('alpha'), alpha);
+      gl.uniform1i(u('between'), b ? 1 : 0);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    },
+  };
+}
+
 // Tiers the view needs: a coarser one only where the view reaches beyond the
 // finer one, so phones zoomed in on the Netherlands load just the detailed
-// images. All of the hour's images of those tiers are added at once
-// (invisible), so they're loaded by the time the timeline reaches them.
+// images. All of the hour's images of those tiers are loaded at once.
 function loadSat() {
   if (!sat.on) return;
   const view = map.getBounds();
   sat.tiers.forEach((tier, k) => {
     if (k > 0 && sat.tiers[k - 1].bounds.contains(view)) return;
-    for (const e of sat.list) {
-      const url = e.urls[k];
-      if (url && !sat.overlays.has(url)) {
-        sat.overlays.set(url, L.imageOverlay(url, tier.bounds, { pane: 'sat', opacity: 0, interactive: false }).addTo(map));
-      }
+    if (!tier.r) {
+      tier.r = makeSatRenderer();
+      if (!tier.r) return;
+      tier.overlay = new CanvasOverlay(tier.r.canvas, tier.bounds, { pane: 'sat', interactive: false }).addTo(map);
+      tier.overlay.getElement().style.zIndex = sat.tiers.length - k;   // finer tiers on top
+    }
+    for (const u of [...sat.list.flatMap((e) => [e.urls[k], e.flows[k]]), sat.motion[k]]) {
+      if (!u || sat.textures.has(u)) continue;
+      const x = { tier, tex: null };
+      sat.textures.set(u, x);
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = () => {
+        if (sat.textures.get(u) !== x) return;
+        x.tex = tier.r.texture(img);
+        x.w = img.naturalWidth; x.h = img.naturalHeight;
+        requestDraw();
+      };
+      img.onerror = () => sat.textures.delete(u);
+      img.src = u;
     }
   });
 }
 map.on('moveend', () => { if (sat.on) { loadSat(); requestDraw(); } });
 
-// The image for the timeline position, cross-faded into the next one. After
-// the newest image (always, for the forecast) it stays on the newest.
+// After the newest image the clouds keep drifting, fading a little: tested to
+// beat a frozen image up to an hour ahead (job/sky.py); further is untested.
+const driftAlpha = (min) => (min <= 30 ? 1 : Math.max(0.6, 1 - (min - 30) / 120 * 0.4));
+
 function drawSat() {
   const label = $('clouds-time');
-  if (!sat.on || !sat.list.length || !state.frames.length) {
-    for (const o of sat.overlays.values()) o.setOpacity(0);
-    label.textContent = '';
-    return;
-  }
-  const t = state.frames[0].t + state.pos * STEP, l = sat.list;
-  const i = Math.max(0, l.findLastIndex((e) => e.t <= t));
-  const a = l[i], b = l[i + 1];
-  const f = b && t > a.t ? Math.min(1, (t - a.t) / (b.t - a.t)) : 0;
-  // Coarser tiers under finer ones; the next image fading in over the current.
-  const n = sat.tiers.length, z = new Map();
-  for (let k = 0; k < n; k++) {
-    // A tier missing at this time (failed fetch, retried by the job) shows its latest earlier image.
-    const own = l.slice(0, i + 1).findLast((e) => e.urls[k]) ?? l.find((e) => e.urls[k]);
-    if (own) z.set(own.urls[k], [(n - 1 - k) * 2 + 1, 1]);
-    if (b?.urls[k]) z.set(b.urls[k], [(n - 1 - k) * 2 + 2, f]);
-  }
-  for (const [url, o] of sat.overlays) {
-    const [zi, op] = z.get(url) ?? [0, 0];
-    o.setOpacity(op);
-    o.setZIndex(zi);
-  }
-  label.textContent = hhmm(f > 0.5 ? b.t : a.t);
+  const on = sat.on && sat.list.length && state.frames.length;
+  for (const tier of sat.tiers) if (tier.overlay) tier.overlay.getElement().style.display = on ? '' : 'none';
+  if (!on) { label.textContent = ''; return; }
+  const t = state.frames[0].t + state.pos * STEP;
+  const tex = (u) => (u ? sat.textures.get(u)?.tex ?? null : null);
+  sat.tiers.forEach((tier, k) => {
+    if (!tier.r) return;
+    const imgs = sat.list.filter((e) => tex(e.urls[k]));
+    if (!imgs.length) return tier.r.draw({ a: null, w: 1, h: 1 });
+    const { w, h } = sat.textures.get(imgs[0].urls[k]);
+    const i = imgs.findLastIndex((e) => e.t <= t);
+    const a = imgs[Math.max(0, i)], b = i >= 0 ? imgs[i + 1] : null;
+    let label0 = null;
+    if (i < 0) {
+      tier.r.draw({ a: tex(a.urls[k]), w, h });
+      label0 = hhmm(a.t);
+    } else if (b) {
+      const s = (t - a.t) / (b.t - a.t);
+      tier.r.draw({ a: tex(a.urls[k]), b: tex(b.urls[k]), flow: tex(a.flows[k]), s, k: (b.t - a.t) / 6e5, w, h });
+      label0 = hhmm(s > 0.5 ? b.t : a.t);
+    } else {
+      const min = (t - a.t) / 60e3;
+      tier.r.draw({ a: tex(a.urls[k]), flow: tex(sat.motion[k]), k: min / 10, alpha: driftAlpha(min), w, h });
+      label0 = min < 5 ? hhmm(a.t) : `${hhmm(a.t)}, drifted`;
+    }
+    if (k === 0) label.textContent = label0;
+  });
 }
 
 function setClouds(on) {
@@ -1091,7 +1209,7 @@ async function fetchPlan() {
         .then((r) => (r.ok ? r.json() : null)).catch(() => null);
       const [skill, coverage, compare, sun] = await Promise.all(['skill.json', 'coverage.json', 'compare.json', 'sun.json'].map(extra));
       const dwd = idx.dwd?.fc ? { ...idx.dwd, base: DATA } : null;
-      return { t0, ref: Date.parse(idx.ref), data: [...entries(idx.obs, 'obs'), ...entries(idx.fc, 'fc')], skill, coverage, compare, dwd, sun, sat: idx.sat ?? [], satTiers: idx.sat_tiers ?? null };
+      return { t0, ref: Date.parse(idx.ref), data: [...entries(idx.obs, 'obs'), ...entries(idx.fc, 'fc')], skill, coverage, compare, dwd, sun, sat: idx.sat ?? [], satTiers: idx.sat_tiers ?? null, satMotion: idx.sat_motion ?? null };
     }
     console.warn('job output is stale; using KNMI directly');
   } catch (e) {
@@ -1131,7 +1249,7 @@ async function update() {
   state.skill = plan.skill ?? null;
   state.compare = plan.compare ?? null;
   state.sun = plan.sun ?? null;
-  syncSat(plan.sat, plan.satTiers);
+  syncSat(plan.sat, plan.satTiers, plan.satMotion);
   loadDwd(plan.dwd);
   if (plan.coverage) store.set('coverage', plan.coverage);
   state.coverage.knmi = plan.coverage ?? store.get('coverage');

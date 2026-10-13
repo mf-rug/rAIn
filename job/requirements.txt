@@ -3,3 +3,4 @@ numpy
 pyproj
 pillow
 shapely
+opencv-python-headless
