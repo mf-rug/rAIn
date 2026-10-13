@@ -26,6 +26,7 @@ State in OUT/state/sky.json; for the app OUT/sun.json (stations, past hour)
 and the satellite images; the scores in OUT/sky.json.
 """
 
+import io
 import json
 import math
 import urllib.error
@@ -33,11 +34,16 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 
 import numpy as np
+from PIL import Image
 
 SAT_WMS = "https://view.eumetsat.int/geoserver/wms"
 SAT_LAYER = "mtg_fd:rgb_geocolour"
 SAT_STEP = timedelta(minutes=10)
 SAT_W, SAT_H = 1000, 1072        # the radar grid's area (≈1.2 Mercator km per pixel)
+# A coarser image of the wider area (≈10°W–25°E, 41–60°N, ≈3.7 Mercator km per
+# pixel) under the detailed one, for the map zoomed out.
+WIDE = (-1113195, 5012341, 2782987, 8399738)
+WIDE_W, WIDE_H = 1040, 905
 SAT_BUDGET = 60                  # seconds per run for satellite requests
 
 STN = "10-minute-in-situ-meteorological-observations/versions/1.0"
@@ -82,6 +88,16 @@ def sat_latest():
     return parse(dim.split("/")[1].replace(".000Z", "Z"))
 
 
+def sat_image(t, bbox, w, h):
+    q = (f"service=WMS&version=1.3.0&request=GetMap&layers={SAT_LAYER}&styles=&crs=EPSG:3857"
+         f"&bbox={','.join(str(v) for v in bbox)}&width={w}&height={h}&format=image/jpeg&time={iso(t)}")
+    with urllib.request.urlopen(f"{SAT_WMS}?{q}", timeout=20) as r:
+        body = r.read()
+        if not r.headers.get("Content-Type", "").startswith("image/"):
+            raise ValueError(r.headers.get("Content-Type"))
+    return body
+
+
 def satellite(out, old, oldest):
     """Satellite images from oldest to the newest out, one per 10 minutes.
     Returns [{"t", "file"}]; entries with "gap" mark times without an image.
@@ -99,20 +115,20 @@ def satellite(out, old, oldest):
         return sorted(have.values(), key=lambda e: e["t"])
     start = datetime.now(timezone.utc)
     while t >= oldest and (datetime.now(timezone.utc) - start).total_seconds() < SAT_BUDGET:
-        if iso(t) not in have:
-            name = f"sat-{t:%Y%m%d%H%M}.jpg"
-            q = (f"service=WMS&version=1.3.0&request=GetMap&layers={SAT_LAYER}&styles=&crs=EPSG:3857"
-                 f"&bbox={X0},{Y0},{X1},{Y1}&width={SAT_W}&height={SAT_H}&format=image/jpeg&time={iso(t)}")
-            try:
-                with urllib.request.urlopen(f"{SAT_WMS}?{q}", timeout=20) as r:
-                    body = r.read()
-                    if not r.headers.get("Content-Type", "").startswith("image/"):
-                        raise ValueError(r.headers.get("Content-Type"))
-                (out / name).write_bytes(body)
-                have[iso(t)] = {"t": iso(t), "file": name}
+        e = have.get(iso(t))
+        try:
+            if e is None:
+                name = f"sat-{t:%Y%m%d%H%M}.jpg"
+                (out / name).write_bytes(sat_image(t, (X0, Y0, X1, Y1), SAT_W, SAT_H))
+                e = have[iso(t)] = {"t": iso(t), "file": name}
                 print("satellite", iso(t))
-            except Exception as e:   # retried next run
-                print("satellite failed", iso(t), getattr(e, "code", e))
+            if "file" in e and not (e.get("wide") and (out / e["wide"]).exists()):
+                name = f"sat-wide-{t:%Y%m%d%H%M}.jpg"
+                # Recompressed: the service's JPEGs are large for a phone.
+                Image.open(io.BytesIO(sat_image(t, WIDE, WIDE_W, WIDE_H))).save(out / name, quality=65, optimize=True)
+                e["wide"] = name
+        except Exception as ex:   # retried next run
+            print("satellite failed", iso(t), getattr(ex, "code", ex))
         t -= SAT_STEP
     # Copies of a neighbour: keep the earlier one. A copy at the newest end is
     # dropped and asked for again next run (the capabilities can list a time
@@ -125,6 +141,8 @@ def satellite(out, old, oldest):
         body = (out / e["file"]).read_bytes()
         if prev is not None and body == prev:
             (out / e.pop("file")).unlink()
+            if e.get("wide"):
+                (out / e.pop("wide")).unlink(missing_ok=True)
             e["gap"] = True
             if all(x.get("gap") for x in entries[k:]):
                 return [x for x in entries[:k]]

@@ -639,7 +639,7 @@ function showCoverage() {
 function drawCoverage(ring) {
   if (!ring?.length) return;
   const rings = typeof ring[0][0] === 'number' ? [ring] : ring;
-  const key = `${rings.length}|${rings[0].length}|${rings[0][0]}|${dark.matches}`;
+  const key = `${rings.length}|${rings[0].length}|${rings[0][0]}|${dark.matches}|${sat.on}`;
   if (key === coverageKey) return;
   coverageKey = key;
   coverageLayers.forEach((l) => l.remove());
@@ -655,7 +655,7 @@ function drawCoverage(ring) {
   svg.querySelector('#nodata-hatch')?.parentNode.remove();
   const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
   defs.innerHTML = `<pattern id="nodata-hatch" width="7" height="7" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
-    <rect width="7" height="7" fill="${css.getPropertyValue('--sky').trim()}" fill-opacity="0.6"/>
+    <rect width="7" height="7" fill="${css.getPropertyValue('--sky').trim()}" fill-opacity="${sat.on ? 0 : 0.6}"/>
     <line x1="0" y1="0" x2="0" y2="7" stroke="${css.getPropertyValue('--muted').trim()}" stroke-width="1.5" stroke-opacity="0.35"/></pattern>`;
   svg.insertBefore(defs, svg.firstChild);
 }
@@ -913,10 +913,14 @@ map.getPane('sat').style.zIndex = 300;   // over the basemap, under the veil and
 map.getPane('sat').style.pointerEvents = 'none';
 const sat = { list: [], overlays: new Map(), on: false };
 
-function syncSat(list) {
-  sat.list = (list ?? []).filter((e) => e.file).map((e) => ({ t: Date.parse(e.t), url: DATA + e.file }));
+function syncSat(list, wide) {
+  // Each time: a detailed image of the radar's area over a coarser, wider one.
+  if (wide) sat.wide = L.latLngBounds(L.CRS.EPSG3857.unproject(L.point(wide[0], wide[1])), L.CRS.EPSG3857.unproject(L.point(wide[2], wide[3])));
+  sat.list = (list ?? []).filter((e) => e.file).map((e) => ({
+    t: Date.parse(e.t), url: DATA + e.file, wide: e.wide && sat.wide ? DATA + e.wide : null,
+  }));
   $('clouds').hidden = !sat.list.length;
-  const keep = new Set(sat.list.map((e) => e.url));
+  const keep = new Set(sat.list.flatMap((e) => [e.url, e.wide]));
   for (const [url, o] of sat.overlays) {
     if (!keep.has(url)) { o.remove(); sat.overlays.delete(url); }
   }
@@ -927,12 +931,11 @@ function syncSat(list) {
 // All of the hour's images are added at once (invisible), so they're loaded
 // by the time the timeline reaches them.
 function satOverlay(e) {
-  let o = sat.overlays.get(e.url);
-  if (!o) {
-    o = L.imageOverlay(e.url, BOUNDS, { pane: 'sat', opacity: 0, interactive: false }).addTo(map);
-    sat.overlays.set(e.url, o);
+  for (const [url, bounds] of [[e.url, BOUNDS], [e.wide, sat.wide]]) {
+    if (url && !sat.overlays.has(url)) {
+      sat.overlays.set(url, L.imageOverlay(url, bounds, { pane: 'sat', opacity: 0, interactive: false }).addTo(map));
+    }
   }
-  return o;
 }
 
 // The image for the timeline position, cross-faded into the next one. After
@@ -948,10 +951,12 @@ function drawSat() {
   const i = Math.max(0, l.findLastIndex((e) => e.t <= t));
   const a = l[i], b = l[i + 1];
   const f = b && t > a.t ? Math.min(1, (t - a.t) / (b.t - a.t)) : 0;
+  // Wide images under detailed ones; the next one fading in over the current.
+  const z = new Map([[a.wide, [1, 1]], [b?.wide, [2, f]], [a.url, [3, 1]], [b?.url, [4, f]]]);
   for (const [url, o] of sat.overlays) {
-    const on = url === a.url ? 1 : b && url === b.url ? f : 0;
-    o.setOpacity(on);
-    o.setZIndex(url === a.url ? 1 : 2);
+    const [zi, op] = z.get(url) ?? [0, 0];
+    o.setOpacity(op);
+    o.setZIndex(zi);
   }
   label.textContent = hhmm(f > 0.5 ? b.t : a.t);
 }
@@ -965,6 +970,7 @@ function setClouds(on) {
   homeLayers.forEach((l) => l.remove());
   homeLayers = [];
   if (state.point) highlightCountry(state.point);
+  showCoverage();   // over clouds, no-radar areas get only the hatch lines
   requestDraw();
 }
 $('clouds').addEventListener('click', () => setClouds(!sat.on));
@@ -1068,7 +1074,7 @@ async function fetchPlan() {
         .then((r) => (r.ok ? r.json() : null)).catch(() => null);
       const [skill, coverage, compare, sun] = await Promise.all(['skill.json', 'coverage.json', 'compare.json', 'sun.json'].map(extra));
       const dwd = idx.dwd?.fc ? { ...idx.dwd, base: DATA } : null;
-      return { t0, ref: Date.parse(idx.ref), data: [...entries(idx.obs, 'obs'), ...entries(idx.fc, 'fc')], skill, coverage, compare, dwd, sun, sat: idx.sat ?? [] };
+      return { t0, ref: Date.parse(idx.ref), data: [...entries(idx.obs, 'obs'), ...entries(idx.fc, 'fc')], skill, coverage, compare, dwd, sun, sat: idx.sat ?? [], satWide: idx.sat_wide ?? null };
     }
     console.warn('job output is stale; using KNMI directly');
   } catch (e) {
@@ -1108,7 +1114,7 @@ async function update() {
   state.skill = plan.skill ?? null;
   state.compare = plan.compare ?? null;
   state.sun = plan.sun ?? null;
-  syncSat(plan.sat);
+  syncSat(plan.sat, plan.satWide);
   loadDwd(plan.dwd);
   if (plan.coverage) store.set('coverage', plan.coverage);
   state.coverage.knmi = plan.coverage ?? store.get('coverage');
