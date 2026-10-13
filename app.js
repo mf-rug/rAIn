@@ -1163,8 +1163,9 @@ function loadSat() {
 }
 map.on('moveend', () => { if (sat.on) { loadSat(); requestDraw(); } });
 
-// After the newest image the clouds keep drifting, fading a little: tested to
-// beat a frozen image up to an hour ahead (job/sky.py); further is untested.
+// After now, drifted clouds fade with the reliability strip under the graph
+// (today's forecasts at the point; a stand-in, as both are drift forecasts of
+// the same weather). Without reliability: a fade by time since the image.
 const driftAlpha = (min) => (min <= 30 ? 1 : Math.max(0.6, 1 - (min - 30) / 120 * 0.4));
 
 function drawSat() {
@@ -1173,6 +1174,8 @@ function drawSat() {
   for (const tier of sat.tiers) if (tier.overlay) tier.overlay.getElement().style.display = on ? '' : 'none';
   if (!on) { label.textContent = ''; return; }
   const t = state.frames[0].t + state.pos * STEP;
+  const kind = kindAt(pointSeries(), Math.round(state.pos)), tr = trustAt(state.pos, kind);
+  const fade = t <= state.frames[state.nowIdx]?.t ? 1 : tr == null ? null : trustOpacity(confidence(kind, tr), 0.35);
   const tex = (u) => (u ? sat.textures.get(u)?.tex ?? null : null);
   sat.tiers.forEach((tier, k) => {
     if (!tier.r) return;
@@ -1191,7 +1194,7 @@ function drawSat() {
       label0 = hhmm(s > 0.5 ? b.t : a.t);
     } else {
       const min = (t - a.t) / 60e3;
-      tier.r.draw({ a: tex(a.urls[k]), flow: tex(sat.motion[k]), k: min / 10, alpha: driftAlpha(min), w, h });
+      tier.r.draw({ a: tex(a.urls[k]), flow: tex(sat.motion[k]), k: min / 10, alpha: fade ?? driftAlpha(min), w, h });
       label0 = min < 5 ? hhmm(a.t) : `${hhmm(a.t)}, drifted`;
     }
     if (k === 0) label.textContent = label0;
