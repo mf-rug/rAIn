@@ -1163,10 +1163,12 @@ function loadSat() {
 }
 map.on('moveend', () => { if (sat.on) { loadSat(); requestDraw(); } });
 
-// After now, drifted clouds fade with the reliability strip under the graph
-// (today's forecasts at the point; a stand-in, as both are drift forecasts of
-// the same weather). Without reliability: a fade by time since the image.
-const driftAlpha = (min) => (min <= 30 ? 1 : Math.max(0.6, 1 - (min - 30) / 120 * 0.4));
+// After now, drifted clouds dim gently with the reliability strip under the
+// graph (today's forecasts at the point; a stand-in, as both are drift
+// forecasts of the same weather), by at most CLOUD_DIM. Without reliability:
+// by time since the image.
+const CLOUD_DIM = 0.3;
+const driftAlpha = (min) => (min <= 30 ? 1 : Math.max(1 - CLOUD_DIM, 1 - (min - 30) / 120 * CLOUD_DIM));
 
 function drawSat() {
   const label = $('clouds-time');
@@ -1174,8 +1176,8 @@ function drawSat() {
   for (const tier of sat.tiers) if (tier.overlay) tier.overlay.getElement().style.display = on ? '' : 'none';
   if (!on) { label.textContent = ''; return; }
   const t = state.frames[0].t + state.pos * STEP;
-  const kind = kindAt(pointSeries(), Math.round(state.pos)), tr = trustAt(state.pos, kind);
-  const fade = t <= state.frames[state.nowIdx]?.t ? 1 : tr == null ? null : trustOpacity(confidence(kind, tr), 0.35);
+  const n = state.pos <= state.nowIdx ? 1 : confAt(state.pos);
+  const fade = n == null ? null : 1 - CLOUD_DIM * (1 - n);
   const tex = (u) => (u ? sat.textures.get(u)?.tex ?? null : null);
   sat.tiers.forEach((tier, k) => {
     if (!tier.r) return;
@@ -1551,6 +1553,38 @@ function confidence(kind, v) {
   return Math.max(0, Math.min(1, (v - floor) / (high - floor)));
 }
 const trustOpacity = (n, floor = 0.25) => floor + (1 - floor) * n;
+
+// Confidence (0–1) per timeline frame after now, from the reliability of what
+// the frame forecasts at the point, smoothed over time (Gaussian, CONF_SMOOTH
+// frames): rain and dry forecasts, and dry spots near or far from rain, differ
+// so much in reliability that it would jump between neighbouring frames.
+// Used by the strip, the curve's fade and the clouds.
+const CONF_SMOOTH = 3;
+function confSeries(series) {
+  const raw = series.map((_, i) => {
+    if (i <= state.nowIdx) return null;
+    const kind = kindAt(series, i), v = trustAt(i, kind);
+    return v == null ? null : confidence(kind, v);
+  });
+  const r = Math.ceil(CONF_SMOOTH * 2);
+  return raw.map((v, i) => {
+    if (v == null) return null;
+    let sum = 0, wsum = 0;
+    for (let d = -r; d <= r; d++) {
+      const x = raw[i + d];
+      if (x == null) continue;
+      const wt = Math.exp(-(d * d) / (2 * CONF_SMOOTH * CONF_SMOOTH));
+      sum += wt * x; wsum += wt;
+    }
+    return sum / wsum;
+  });
+}
+// Smoothed confidence at a timeline position (between frames), or null.
+function confAt(pos) {
+  const c = confSeries(pointSeries()), i = Math.floor(pos), t = pos - i;
+  const a = c[i] ?? c[i + 1], b = c[i + 1] ?? a;
+  return a == null ? null : a + (b - a) * t;
+}
 const trustWord = (kind, v) => {
   const [high, mid, low] = SCALE[kind];
   return `${v >= high ? 'high' : v >= mid ? 'moderate' : v >= low ? 'low' : 'very low'} reliability`;
@@ -1720,11 +1754,9 @@ function drawGraph(series) {
   // Forecast fades out with today's reliability at each lead time.
   const rel = reliability(state.point);
   // Confidence per forecast frame, from the reliability of what it forecasts.
+  const smooth = confSeries(series);
   const conf = [];
-  for (let i = state.nowIdx + 1; i < series.length; i++) {
-    const kind = kindAt(series, i), v = trustAt(i, kind);
-    if (v != null) conf.push([cx(i), confidence(kind, v)]);
-  }
+  for (let i = state.nowIdx + 1; i < series.length; i++) if (smooth[i] != null) conf.push([cx(i), smooth[i]]);
   const offset = (x) => Math.max(0, Math.min(1, (x - nowX) / (w - nowX)));
   if (conf.length) {
     const fade = el('linearGradient', { id: 'trustfade', gradientUnits: 'userSpaceOnUse', x1: nowX, y1: 0, x2: w, y2: 0 }, defs);
