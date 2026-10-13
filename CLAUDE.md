@@ -112,7 +112,12 @@ does and the data sources. This file is about how it's built and what bites.
   The background under clouds is never cloud (that showed as old clouds left
   behind): the ground as last seen clear (`state/clear-{tier}.npz`, day and
   night apart), else a multi-scale smooth fill. Low warm clouds (GeoColour's
-  light blue at night) escape the IR mask and stay put. Throttled at 20
+  light blue at night) escape the IR mask and stay put.
+- **Tier seams:** a finer tier fades out over its outer 4%, judged at where a
+  moved point comes from (`fine` in the shader); near its border its motion
+  is blended into the coarser tier's (`FLOW_EDGE`, flow at an image border is
+  unreliable); all drawn tiers drift from the newest picture they all have;
+  night cloud colour is fitted per picture to GeoColour's own night clouds. Throttled at 20
   requests/min, which is why the job fetches, not the app.
 - **Weather models' sun at a point was poor on the first check** (2026-10-13:
   HARMONIE missed a sunny afternoon in the south, correlation ~0 with the

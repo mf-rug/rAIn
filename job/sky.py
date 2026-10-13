@@ -66,7 +66,8 @@ FLOW_GRID = 32
 FLOW_CAP_KM = 30                 # Mercator km per 10 minutes (~110 km/h on the ground here)
 FLOW_SCALE = 4                   # PNG byte steps per pixel (128 = no motion)
 FLOW_FILL = 6                    # blocks (Gaussian sigma) for filling textureless blocks
-FLOW_VERSION = 2                 # in the file names: a change recomputes all fields
+FLOW_VERSION = 3                 # in the file names: a change recomputes all fields
+FLOW_EDGE = 4                    # grid cells: a finer tier's motion blends into the coarser's at its border
 
 STN = "10-minute-in-situ-meteorological-observations/versions/1.0"
 STN_STEP = timedelta(minutes=10)
@@ -304,7 +305,18 @@ def drift_layers(out, e, key, bbox, w, h):
     # The moving clouds: by day the picture itself; at night coloured from the
     # infrared (as GeoColour draws night clouds), which has no city lights in it.
     v = np.clip((ir - IR_CLEAR) / (130 - IR_CLEAR), 0, 1)[..., None]
-    ir_rgb = np.array([30, 33, 40], np.float32) + v * np.array([105, 110, 120], np.float32)   # GeoColour's faint night clouds
+    # Colour per infrared value fitted on this picture's own cloudy night pixels
+    # (city lights left out), so the drifting clouds look like GeoColour's.
+    grey = img.mean(axis=2)
+    spots = cv2.morphologyEx(grey, cv2.MORPH_TOPHAT, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9)))
+    fit = (night[..., 0] > 0.5) & (cloud > 0.6) & (spots < 12)
+    base, gain = np.array([30, 33, 40], np.float32), np.array([105, 110, 120], np.float32)
+    if fit.sum() > 2000:
+        A = np.stack([np.ones(fit.sum()), v[..., 0][fit]], 1)
+        coef = np.linalg.lstsq(A, img[fit], rcond=None)[0]
+        if (coef[1] > 0).all():
+            base, gain = coef[0].astype(np.float32), coef[1].astype(np.float32)
+    ir_rgb = base + v * gain
     no_lights = img * (1 - night) + ir_rgb * night
     # Background: clear parts as they are (with their city lights); under
     # clouds the ground as last seen clear (day and night kept apart), else a
@@ -339,14 +351,40 @@ def sat_drift(out, entries):
     return res
 
 
+def blend_edge(g, fine, gc, coarse):
+    """A fine tier's motion grid with its outer FLOW_EDGE cells blended into the
+    coarse tier's motion there (resampled, converted to fine pixels)."""
+    (fb, fw, fh), (cb, cw, ch) = fine, coarse
+    n = g.shape[0]
+    j, i = np.mgrid[0:n, 0:n].astype(np.float32)
+    x = fb[0] + (i + 0.5) / n * (fb[2] - fb[0])            # Mercator of the fine cell centres
+    y = fb[3] - (j + 0.5) / n * (fb[3] - fb[1])
+    ci = (x - cb[0]) / (cb[2] - cb[0]) * n - 0.5            # → coarse grid coordinates
+    cj = (cb[3] - y) / (cb[3] - cb[1]) * n - 0.5
+    sampled = np.stack([cv2.remap(np.ascontiguousarray(gc[..., k]), ci, cj, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+                        for k in range(2)], -1)
+    scale = ((cb[2] - cb[0]) / cw) / ((fb[2] - fb[0]) / fw)  # coarse px → fine px
+    d = np.minimum(np.minimum(i, j), np.minimum(n - 1 - i, n - 1 - j))
+    wgt = np.clip(d / FLOW_EDGE, 0, 1)[..., None]
+    return wgt * g + (1 - wgt) * sampled * scale
+
+
 def sat_motion(out, entries):
     """Adds each image's motion towards the next one ("flow": {tier: file})
     and returns the motion for drifting the newest image forward: the mean of
     the last two fields ({tier: file}, or {})."""
     real = [e for e in entries if e.get("file")]
     motion = {}
-    for key, (bbox, w, h) in tier_geometry().items():
+    geo = tier_geometry()
+    coarser = {}   # (tier, image time) → field, of the coarser tier just done
+    # Coarsest first: near its border a finer tier's flow is unreliable (half
+    # the neighbourhood is missing) and would move clouds differently from the
+    # tier underneath, showing a seam; there it takes the coarser motion.
+    order = list(geo)[::-1]
+    for n, key in enumerate(order):
+        bbox, w, h = geo[key]
         km = (bbox[2] - bbox[0]) / w / 1000
+        under = order[n - 1] if n else None
         fields = []
         for a, b in zip(real, real[1:]):
             minutes = (parse(b["t"]) - parse(a["t"])).total_seconds() / 60
@@ -355,11 +393,15 @@ def sat_motion(out, entries):
             name = f"sat-flow{FLOW_VERSION}-{key}-{a['t'][:16].replace('-', '').replace(':', '').replace('T', '')}.png"
             if (a.get("flow") or {}).get(key) != name or not (out / name).exists():
                 try:
-                    save_flow(flow_field(out / a[key], out / b[key], minutes, km), out / name)
+                    g = flow_field(out / a[key], out / b[key], minutes, km)
+                    if under and (under, a["t"]) in coarser:
+                        g = blend_edge(g, (bbox, w, h), coarser[(under, a["t"])], geo[under])
+                    save_flow(g, out / name)
                 except Exception as ex:
                     print("cloud motion failed", key, a["t"], ex)
                     continue
                 a.setdefault("flow", {})[key] = name
+            coarser[(key, a["t"])] = load_flow(out / a["flow"][key])
             fields.append(a["flow"][key])
         if fields:
             name = f"sat-motion{FLOW_VERSION}-{key}-{real[-1]['t'][:16].replace('-', '').replace(':', '').replace('T', '')}.png"

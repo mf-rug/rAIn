@@ -1096,12 +1096,15 @@ function makeSatRenderer() {
     varying vec2 uv;
     uniform sampler2D a, b, flow, cloud, mask, ground;
     uniform float s, k, alpha;
-    uniform bool between, layered;
+    uniform bool between, layered, fine;
     uniform vec2 scale;
-    // Outside the image: transparent, so the coarser tier underneath shows.
+    // Outside the image: transparent, so the coarser tier underneath shows;
+    // with one underneath, fading out over the image's outer 4% (also where
+    // a moved point comes from), so the hand-over shows no line.
     vec4 at(sampler2D t, vec2 q) {
       if (q.x < 0.0 || q.y < 0.0 || q.x > 1.0 || q.y > 1.0) return vec4(0.0);
-      return vec4(texture2D(t, q).rgb, 1.0);
+      float e = fine ? smoothstep(0.0, 0.04, min(min(q.x, q.y), min(1.0 - q.x, 1.0 - q.y))) : 1.0;
+      return vec4(texture2D(t, q).rgb, e);
     }
     vec2 motion(vec2 q) { return (texture2D(flow, q).rg - 128.0 / 255.0) * scale; }   // uv per 10 min
     void main() {
@@ -1131,7 +1134,10 @@ function makeSatRenderer() {
           c = mix(c, split, clamp(k / 2.0, 0.0, 1.0));
         }
       }
-      gl_FragColor = vec4(c.rgb * c.a, c.a) * alpha;
+      // The image fades out over its outer 4%, so a coarser tier underneath
+      // takes over without a visible line.
+      float rim = smoothstep(0.0, 0.04, min(min(uv.x, uv.y), min(1.0 - uv.x, 1.0 - uv.y)));
+      gl_FragColor = vec4(c.rgb * c.a, c.a) * alpha * (fine ? rim : 1.0);
     }`));
   gl.linkProgram(prog);
   gl.useProgram(prog);
@@ -1159,7 +1165,8 @@ function makeSatRenderer() {
     drop: (tex) => tex && gl.deleteTexture(tex),
     // a, b: image textures; flow: motion per 10 minutes (null = none); s: 0..1
     // between a and b; k: the step in tens of minutes.
-    draw({ a, b, flow, s = 0, k = 0, alpha = 1, w, h, layers = null }) {
+    // fine: a coarser tier is drawn underneath (fade out at the rim).
+    draw({ a, b, flow, s = 0, k = 0, alpha = 1, w, h, layers = null, fine = false }) {
       if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; gl.viewport(0, 0, w, h); }
       gl.clearColor(0, 0, 0, 0);
       gl.clear(gl.COLOR_BUFFER_BIT);
@@ -1168,6 +1175,7 @@ function makeSatRenderer() {
       bind(0, a); bind(1, b || a); bind(2, flow || still);
       bind(3, layers?.cloud || a); bind(4, layers?.mask || a); bind(5, layers?.ground || a);
       gl.uniform1i(u('layered'), layers ? 1 : 0);
+      gl.uniform1i(u('fine'), fine ? 1 : 0);
       // Motion bytes: 128 = none, 4 steps per image pixel.
       gl.uniform2f(u('scale'), 255 / 4 / w, 255 / 4 / h);
       gl.uniform1f(u('s'), s); gl.uniform1f(u('k'), k); gl.uniform1f(u('alpha'), alpha);
@@ -1228,27 +1236,31 @@ function drawSat() {
   const n = state.pos <= state.nowIdx ? 1 : confAt(state.pos);
   const fade = n == null ? null : 1 - CLOUD_DIM * (1 - n);
   const tex = (u) => (u ? sat.textures.get(u)?.tex ?? null : null);
+  // All tiers drift from the same picture: the newest that every drawn tier
+  // has (a tier's newest can be missing or still loading).
+  const common = Math.min(...sat.tiers.map((tier, k) => (tier.r ? Math.max(-Infinity, ...sat.list.filter((e) => tex(e.urls[k])).map((e) => e.t)) : Infinity)));
   sat.tiers.forEach((tier, k) => {
     if (!tier.r) return;
-    const imgs = sat.list.filter((e) => tex(e.urls[k]));
+    const fine = sat.tiers.slice(k + 1).some((x) => x.r);
+    const imgs = sat.list.filter((e) => tex(e.urls[k]) && e.t <= common);
     if (!imgs.length) return tier.r.draw({ a: null, w: 1, h: 1 });
     const { w, h } = sat.textures.get(imgs[0].urls[k]);
     const i = imgs.findLastIndex((e) => e.t <= t);
     const a = imgs[Math.max(0, i)], b = i >= 0 ? imgs[i + 1] : null;
     let label0 = null;
     if (i < 0) {
-      tier.r.draw({ a: tex(a.urls[k]), w, h });
+      tier.r.draw({ a: tex(a.urls[k]), w, h, fine });
       label0 = hhmm(a.t);
     } else if (b) {
       const s = (t - a.t) / (b.t - a.t);
-      tier.r.draw({ a: tex(a.urls[k]), b: tex(b.urls[k]), flow: tex(a.flows[k]), s, k: (b.t - a.t) / 6e5, w, h });
+      tier.r.draw({ a: tex(a.urls[k]), b: tex(b.urls[k]), flow: tex(a.flows[k]), s, k: (b.t - a.t) / 6e5, w, h, fine });
       label0 = hhmm(s > 0.5 ? b.t : a.t);
     } else {
       const min = (t - a.t) / 60e3;
       const d = sat.drift[k];
       const layers = d && a.t === sat.driftT && tex(d.cloud) && tex(d.alpha) && tex(d.bg)
         ? { cloud: tex(d.cloud), mask: tex(d.alpha), ground: tex(d.bg) } : null;
-      tier.r.draw({ a: tex(a.urls[k]), flow: tex(sat.motion[k]), k: min / 10, alpha: fade ?? driftAlpha(min), w, h, layers });
+      tier.r.draw({ a: tex(a.urls[k]), flow: tex(sat.motion[k]), k: min / 10, alpha: fade ?? driftAlpha(min), w, h, layers, fine });
       label0 = min < 5 ? hhmm(a.t) : `${hhmm(a.t)}, drifted`;
     }
     if (k === 0) label.textContent = label0;
