@@ -16,14 +16,18 @@ with fake showery rain)
 - **Reliability:** how far ahead today's forecasts actually held up near you,
   shown as a sentence, a fading strip under the graph, a fading curve and map,
   and a label while scrubbing ("high / moderate / low / very low reliability").
-- **Comparison lines:** Buienradar's and DWD's forecasts for the same spot.
+- **KNMI and DWD merged:** the forecast is the average of KNMI's and DWD's
+  nowcasts where both cover (one source alone elsewhere, blended at the edges);
+  the past hour is measured. While scrubbing, both components are shown.
+- **Comparison line:** Buienradar's forecast for the same spot.
 - **Head-to-head scores:** how often KNMI, Buienradar and DWD correctly forecast
   rain one hour ahead, over the last days.
 - **Sky:** measured sunshine over the past hour (nearest KNMI station) along the
   top of the graph, and a "Clouds" satellite layer on the map (EUMETSAT
   Meteosat, every 10 minutes, about half an hour behind): the difference
   between a grey drizzly day and sun between showers, which radar can't show.
-- **Map:** KNMI radar by default; switch to DWD (all of Germany and surroundings).
+- **Map:** the merged radar by default; switch to KNMI alone or DWD alone (all
+  of Germany and surroundings).
   Areas without radar coverage are hatched; your country is subtly highlighted.
 
 ## How it works

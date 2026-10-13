@@ -83,8 +83,9 @@ const DEMO = (() => {
 })();
 
 const state = {
-  mapSource: 'knmi',     // radar shown on the map: 'knmi' or 'dwd'
-  coverage: { knmi: null, dwd: null },
+  mapSource: 'both',     // radar on the map: 'both' (KNMI and DWD merged), 'knmi' or 'dwd'
+  mix: false,            // the timeline is the merged forecast (job/mix.py); false: KNMI's alone
+  coverage: { both: null, knmi: null, dwd: null },
   compare: null,        // KNMI vs Buienradar scores, from job/compare.py
   skill: null,          // recent forecast reliability, from job/verify.py
   sun: null,            // stations' measured sunshine, last hour, from job/sky.py
@@ -468,12 +469,16 @@ const gpu = makeRenderer(W, H);
 
 // Draw the current timeline position, warping between the two nearest frames.
 function drawRadar() {
-  // DWD when chosen and loaded; otherwise KNMI rather than an empty map.
-  const useDwd = state.mapSource === 'dwd' && dwd.renderer && dwd.frames.some((f) => f.tex);
-  const r = useDwd ? dwd.renderer : gpu;
-  gpu.canvas.style.visibility = useDwd ? 'hidden' : 'visible';
-  if (dwd.renderer) dwd.renderer.canvas.style.visibility = useDwd ? 'visible' : 'hidden';
-  const fr = useDwd ? dwd.frames : state.frames;
+  // The chosen source's own layer when it's loaded (DWD, or KNMI alone next
+  // to the merged timeline); otherwise the timeline's frames rather than an
+  // empty map.
+  const src = mapShown();
+  const alt = src === 'dwd' ? dwd : src === 'knmi' && state.mix ? knmiAlone : null;
+  const useAlt = !!(alt?.renderer && alt.frames.some((f) => f.tex));
+  const r = useAlt ? alt.renderer : gpu;
+  gpu.canvas.style.visibility = useAlt ? 'hidden' : 'visible';
+  for (const x of [dwd, knmiAlone]) if (x.renderer) x.renderer.canvas.style.visibility = useAlt && x === alt ? 'visible' : 'hidden';
+  const fr = useAlt ? alt.frames : state.frames;
   drawSat();
   if (!fr.length) return r.draw(null);
   const i = Math.min(Math.floor(state.pos), fr.length - 1);
@@ -484,7 +489,7 @@ function drawRadar() {
   else if (b?.tex) r.draw(b.tex);
   else r.draw(a?.tex ?? null);
   // Further-ahead forecasts fade with today's reliability.
-  const trust = useDwd ? null : trustAt(state.pos, 'rain');   // KNMI's, for the rain it shows
+  const trust = useAlt ? null : trustAt(state.pos, 'rain');   // the timeline's, for the rain it shows
   gpu.canvas.style.opacity = trust == null ? 1 : trustOpacity(confidence('rain', trust), 0.35);
 }
 
@@ -632,7 +637,8 @@ dark.addEventListener('change', drawBorders);
 let coverageLayers = [], coverageKey = '';
 
 function showCoverage() {
-  drawCoverage(state.mapSource === 'dwd' ? state.coverage.dwd : state.coverage.knmi);
+  const src = mapShown();
+  drawCoverage(src === 'dwd' ? state.coverage.dwd : src === 'both' ? state.coverage.both ?? state.coverage.knmi : state.coverage.knmi);
 }
 
 // ring: one [lat, lon] ring, or several (exteriors and holes, even-odd).
@@ -815,7 +821,8 @@ async function loadDwd(meta) {
     state.coverage.dwd = meta.map?.coverage ?? null;
     $('src-dwd').hidden = false;
     syncDwdFrames();
-    if (state.mapSource === 'dwd') showCoverage();
+    syncSourceButtons();
+    if (mapShown() === 'dwd') showCoverage();
     render();
   } catch (e) {
     console.warn('DWD unavailable', e);
@@ -853,7 +860,7 @@ function dwdSeries(pt) {
 // built only while the DWD view is on.
 function syncDwdFrames() {
   const m = dwd.meta?.map;
-  if (state.mapSource !== 'dwd' || !m) return;
+  if (mapShown() !== 'dwd' || !m) return;
   if (!dwd.renderer || dwd.renderer.w !== m.w || dwd.renderer.h !== m.h) {
     dwd.overlay?.remove();
     dwd.renderer = Object.assign(makeRenderer(m.w, m.h), { w: m.w, h: m.h });
@@ -892,16 +899,106 @@ function syncDwdFrames() {
   requestDraw();
 }
 
-// Map source toggle: KNMI (default) or DWD. Remembered per device.
-function setMapSource(src) {
-  state.mapSource = src === 'dwd' && dwd.meta ? 'dwd' : 'knmi';
-  store.set('map', state.mapSource);
-  for (const b of document.querySelectorAll('.source button')) {
-    b.setAttribute('aria-pressed', String(b.dataset.src === state.mapSource));
+// ---------- KNMI alone ----------
+// With the merged timeline, KNMI's own frames are a map option (own canvas on
+// the same grid, loaded only while shown), and KNMI's forecast for the
+// Netherlands window (one stacked image, like DWD's) gives its value at the
+// point for the readout.
+
+const knmiAlone = { meta: null, win: null, frames: [], built: new Map(), renderer: null, overlay: null };
+
+async function loadKnmi(meta) {
+  knmiAlone.meta = meta;
+  if (!meta) { knmiAlone.win = null; return; }
+  syncKnmiFrames();
+  if (knmiAlone.win?.file === meta.win) return;
+  try {
+    const bytes = await greyImage(DATA + meta.win);
+    knmiAlone.win = { file: meta.win, ref: Date.parse(meta.ref), bytes };
+    render();
+  } catch (e) {
+    console.warn('KNMI window unavailable', e);
   }
+}
+
+// KNMI's forecast at the point: time → mm/h (no entries outside its coverage).
+function knmiSeries(pt) {
+  const out = new Map(), k = knmiAlone.win, m = knmiAlone.meta?.geom;
+  if (!k || !pt || !m) return out;
+  const [px, py] = pixelOf(pt);
+  const ax = px - m.x0, ay = py - m.y0;
+  if (ax < 0 || ay < 0 || ax >= m.w || ay >= m.h) return out;
+  for (const f of state.frames) {
+    const i = Math.round((f.t - k.ref) / STEP) - 1;
+    if (i < 0 || (i + 1) * m.w * m.h > k.bytes.length) continue;
+    const b = k.bytes[i * m.w * m.h + ay * m.w + ax];
+    if (b !== 255) out.set(f.t, fromByte(b));
+  }
+  return out;
+}
+
+function syncKnmiFrames() {
+  const m = knmiAlone.meta;
+  if (mapShown() !== 'knmi' || !state.mix || !m) return;
+  if (!knmiAlone.renderer) {
+    knmiAlone.renderer = makeRenderer(W, H);
+    knmiAlone.overlay = new CanvasOverlay(knmiAlone.renderer.canvas, BOUNDS, { className: 'radar-frame', interactive: false }).addTo(map);
+  }
+  const files = new Map([...m.obs, ...m.fc].map((e) => [Date.parse(e.t), e.file]));
+  const keep = new Map();
+  knmiAlone.frames = state.frames.map((f) => {
+    const file = files.get(f.t);
+    if (!file) return { t: f.t };
+    const fr = knmiAlone.built.get(file) ?? { t: f.t, file };
+    keep.set(file, fr);
+    return fr;
+  });
+  for (const [file, fr] of knmiAlone.built) {
+    if (!keep.has(file)) { knmiAlone.renderer.drop(fr.tex); knmiAlone.renderer.drop(fr.flowTex); }
+  }
+  knmiAlone.built = keep;
+  for (const fr of knmiAlone.frames) { knmiAlone.renderer.drop(fr.flowTex); fr.flowTex = null; }
+  for (const fr of knmiAlone.frames.filter((x) => x.file && !x.bytes && !x.loading)) {
+    fr.loading = true;
+    greyImage(DATA + fr.file).then((bytes) => {
+      fr.bytes = bytes;
+      fr.tex = knmiAlone.renderer.frameTexture(bytes);
+      computeFlows(knmiAlone.frames, knmiAlone.renderer);
+      requestDraw();
+    }).catch((e) => console.warn('KNMI frame unavailable', fr.file, e)).finally(() => { fr.loading = false; });
+  }
+  computeFlows(knmiAlone.frames, knmiAlone.renderer);
+  requestDraw();
+}
+
+// Map toggle: Both (KNMI and DWD merged, default), KNMI or DWD. It changes
+// the map only; the graph and headline always use the timeline (merged when
+// available). Remembered per device.
+function setMapSource(src) {
+  state.mapSource = ['both', 'knmi', 'dwd'].includes(src) ? src : 'both';
+  store.set('mapsrc', state.mapSource);
+  syncSourceButtons();
   syncDwdFrames();
+  syncKnmiFrames();
   showCoverage();
   requestDraw();
+}
+
+// What the map can show right now: without a merged timeline, "Both" is KNMI;
+// DWD only once its frames are listed.
+function mapShown() {
+  const s = state.mapSource;
+  if (s === 'dwd') return dwd.meta ? 'dwd' : state.mix ? 'both' : 'knmi';
+  if (s === 'both') return state.mix ? 'both' : 'knmi';
+  return 'knmi';
+}
+
+function syncSourceButtons() {
+  const shown = mapShown();
+  for (const b of document.querySelectorAll('.source button')) {
+    if (b.dataset.src === 'both') b.hidden = !state.mix;
+    b.setAttribute('aria-pressed', String(b.dataset.src === shown));
+  }
 }
 for (const b of document.querySelectorAll('.source button')) {
   b.addEventListener('click', () => setMapSource(b.dataset.src));
@@ -1214,7 +1311,11 @@ async function fetchPlan() {
         .then((r) => (r.ok ? r.json() : null)).catch(() => null);
       const [skill, coverage, compare, sun] = await Promise.all(['skill.json', 'coverage.json', 'compare.json', 'sun.json'].map(extra));
       const dwd = idx.dwd?.fc ? { ...idx.dwd, base: DATA } : null;
-      return { t0, ref: Date.parse(idx.ref), data: [...entries(idx.obs, 'obs'), ...entries(idx.fc, 'fc')], skill, coverage, compare, dwd, sun, sat: idx.sat ?? [], satTiers: idx.sat_tiers ?? null, satMotion: idx.sat_motion ?? null };
+      // The timeline: KNMI and DWD merged when the job made it, else KNMI's.
+      const m = idx.mix;
+      const data = m ? [...entries(m.obs, 'obs'), ...entries(m.fc, 'fc')] : [...entries(idx.obs, 'obs'), ...entries(idx.fc, 'fc')];
+      const knmi = m ? { obs: idx.obs, fc: idx.fc, win: m.knmi_win, ref: m.knmi_ref, geom: m.win } : null;
+      return { t0, ref: Date.parse(idx.ref), data, mix: !!m, mixDwd: m?.dwd ?? null, mixCoverage: m?.coverage ?? null, knmi, skill, coverage, compare, dwd, sun, sat: idx.sat ?? [], satTiers: idx.sat_tiers ?? null, satMotion: idx.sat_motion ?? null };
     }
     console.warn('job output is stale; using KNMI directly');
   } catch (e) {
@@ -1258,6 +1359,10 @@ async function update() {
   loadDwd(plan.dwd);
   if (plan.coverage) store.set('coverage', plan.coverage);
   state.coverage.knmi = plan.coverage ?? store.get('coverage');
+  state.mix = !!plan.mix;
+  state.coverage.both = plan.mixCoverage ?? null;
+  loadKnmi(plan.knmi);
+  syncSourceButtons();
   showCoverage();
   const { t0, ref } = plan;
   const due = dueAfter(t0, ref);
@@ -1286,8 +1391,10 @@ async function update() {
   computeFlows();
   requestDraw();
   const dwdFiles = plan.dwd ? [plan.dwd.fc, ...plan.dwd.obs.map((o) => o.file), ...(plan.dwd.map?.fc ?? []), ...(plan.dwd.map?.obs ?? []).map((o) => o.file)] : [];
-  pruneCache(new Set([...next.map((f) => f.url), ...dwdFiles.map((f) => DATA + f)]));
+  const knmiFiles = plan.knmi ? [plan.knmi.win, ...[...plan.knmi.obs, ...plan.knmi.fc].map((e) => e.file)] : [];
+  pruneCache(new Set([...next.map((f) => f.url), ...[...dwdFiles, ...knmiFiles].map((f) => DATA + f)]));
   syncDwdFrames();
+  syncKnmiFrames();
 
   // Now first, then the forecast in order, then the past.
   const idx = next.map((_, i) => i);
@@ -1693,8 +1800,8 @@ function drawGraph(series) {
     el('line', { x1: w - 142, x2: w - 128, y1: 5, y2: 5, class: 'br' }, graph);
     el('text', { x: w - 124, y: 8, class: 'band' }, graph).textContent = 'Buienradar';
   }
-  // DWD's forecast, where it covers the point (eastern Netherlands).
-  const dw = dwdSeries(state.point);
+  // Without the merged timeline: DWD's forecast as a line, where it covers.
+  const dw = state.mix ? new Map() : dwdSeries(state.point);
   const dwPts = [];
   state.frames.forEach((f, i) => {
     const v = dw.get(f.t);
@@ -1814,9 +1921,14 @@ function drawReadout(series) {
   const trust = trustAt(state.pos, tkind);
   const sure = trust == null || atNow ? '' : ` · ${trustWord(tkind, trust)}`;
   const bv = br.series.get(fr[Math.round(state.pos)]?.t);
-  const dv = dwdSeries(state.point).get(fr[Math.round(state.pos)]?.t);
+  const ft = fr[Math.round(state.pos)]?.t, ahead = Math.round(state.pos) > state.nowIdx;
+  const dv = dwdSeries(state.point).get(ft);
+  const kv = state.mix && ahead ? knmiSeries(state.point).get(ft) : null;
   const fmt = (x) => (x < WET ? 'dry' : `${x.toFixed(1)}\u00a0mm/h`);
-  const other = (bv == null ? '' : ` · Buienradar ${fmt(bv)}`) + (dv == null || Math.round(state.pos) < state.nowIdx ? '' : ` · DWD ${fmt(dv)}`);
+  // Merged: the two forecasts it averages, then Buienradar's.
+  const other = (kv == null ? '' : ` · KNMI ${fmt(kv)}`)
+    + (dv == null || Math.round(state.pos) < state.nowIdx ? '' : ` · DWD ${fmt(dv)}`)
+    + (bv == null ? '' : ` · Buienradar ${fmt(bv)}`);
   const sky = state.pos <= state.nowIdx ? sunWord(sunSeries(state.point), tm) : null;
   $('readout').textContent = `${when} · ${what}${sky ? ` · ${sky}` : ''}${sure}${other}`;
 }
@@ -1874,8 +1986,8 @@ addEventListener('resize', render);
 // ---------- start ----------
 
 if (!gpu.ok) showStatus('This browser can’t draw the radar map (WebGL is unavailable).');
-state.mapSource = store.get('map') === 'dwd' ? 'dwd' : 'knmi';
-for (const b of document.querySelectorAll('.source button')) b.setAttribute('aria-pressed', String(b.dataset.src === state.mapSource));
+state.mapSource = store.get('mapsrc') ?? 'both';
+syncSourceButtons();
 sat.on = store.get('clouds') === true;
 $('clouds').setAttribute('aria-pressed', String(sat.on));
 startLoading();

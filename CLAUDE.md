@@ -12,6 +12,7 @@ does and the data sources. This file is about how it's built and what bites.
 | `job/verify.py` | Forecast reliability (CSI at ~4 km, per ~40 km tile, last 6 h) → skill.json. |
 | `job/compare.py` | KNMI vs Buienradar vs DWD (+ consensus) at 32 places → compare.json. |
 | `job/dwd.py` | DWD RADVOR nowcast: NL-window images (graph line) and full-area map frames. |
+| `job/mix.py` | KNMI + DWD merged: the default timeline (graph, headline, reliability, map "Both"). |
 | `job/sky.py` | EUMETSAT satellite images (map "Clouds"), KNMI stations' sunshine (graph strip), model sun-forecast scores → sky.json. |
 | `.github/workflows/radar.yml` | Runs the job, stores state on the `data` branch, deploys app + data to Pages. |
 | `countries.geojson`, `borders.geojson` | Natural Earth, pre-cut to the radar areas. |
@@ -34,6 +35,15 @@ does and the data sources. This file is about how it's built and what bites.
   `dwd` block), `obs-*.png`, `fc-REF-T.png`, `skill.json`, `compare.json`,
   `coverage.json`, DWD files (`dwd-fc-*`, `dwd-obs-*` = NL window; `dwd-map-*` =
   full DWD area on its own 1113×1043 grid).
+- **Merged timeline (`index.json` → `mix`, since 2026-10-13):** `mix-obs-*`
+  (KNMI's observation where KNMI covers, DWD's analysis outside; not averaged)
+  and `mix-fc-{knmiref}-{dwdref|none}-{t}` (mean mm/h where both cover, one
+  source alone elsewhere, weights ramped over ~20 km at each coverage edge;
+  DWD left out when its run is >15 min older than KNMI's), on KNMI's grid.
+  `knmi-win-*` = KNMI's forecast in the NL window for the readout; `coverage`
+  = union outline. The app uses `mix` as its timeline when present; the map
+  toggle Both | KNMI | DWD changes only the map. verify.py scores the merged
+  forecast (backfilled runs are still KNMI-only).
 - **Sky files:** `sat-*.jpg` (EUMETSAT GeoColour, radar grid's bbox, 1000×1072,
   every 10 min; listed in `index.json` → `sat`, entries with `gap` have no
   image), `sun.json` (stations' 10-min sunshine minutes, cloud okta, weather
@@ -128,6 +138,10 @@ does and the data sources. This file is about how it's built and what bites.
 
 ## Status and open threads (as of 2026-10-12)
 
+- **Merged is the default since 2026-10-13** (user's call, before the
+  benchmark is in). Known cost: averaging spreads rain out (wider, weaker,
+  earlier starts where the two disagree; 0.3 + 0 → 0.15 = the rain threshold).
+  The benchmark below decides whether to keep it.
 - **Consensus forecasts** (`mean2` = KNMI+DWD, `mean3` = all three) are being
   scored in compare.py's `east` set since 2026-10-12. After a few rainy days,
   compare them with KNMI alone (compare.json → `east`). If one clearly wins,

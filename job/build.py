@@ -24,6 +24,7 @@ from PIL import Image
 from pyproj import Transformer
 
 import dwd
+import mix
 import sky
 from compare import Compare
 from verify import Verifier
@@ -231,6 +232,7 @@ def main():
     fc_name = latest(FC)
     ref = stamp(fc_name)
     fc = []
+    new_run = None
     if old.get("ref") == iso(ref) and all((OUT / e["file"]).exists() for e in old.get("fc", [])):
         fc = old["fc"]
     else:
@@ -241,7 +243,7 @@ def main():
             name = f"fc-{ref:%Y%m%d%H%M}-{t:%Y%m%d%H%M}.png"
             save(grid, name)
             fc.append({"t": iso(t), "file": name})
-        verifier.add_run(ref, grids[1:])
+        new_run = grids            # scored below, merged with DWD
         compare.add_knmi(ref, grids[1:])
         print("forecast run", iso(ref))
 
@@ -330,7 +332,24 @@ def main():
             print(f"sky {step.__name__}:", e)
     sky_state.save(now)
 
+    # KNMI and DWD merged: the app's default timeline (job/mix.py). Reliability
+    # is scored for it, as it's what the app shows.
+    global OBS_VALID
+    if OBS_VALID is None and (OUT / "state" / "obs-valid.npz").exists():
+        OBS_VALID = np.load(OUT / "state" / "obs-valid.npz")["m"]
+    mix_block, mixed = None, None
+    if OBS_VALID is not None:
+        try:
+            mix_block, mixed = mix.build(OUT, obs, fc, ref, dwd_meta, OBS_VALID)
+            print("merged, DWD run", mix_block["dwd"])
+        except Exception as e:
+            print("merge unavailable:", e)
+    if new_run is not None:
+        verifier.add_run(ref, (mixed if mixed and len(mixed) == len(new_run) else new_run)[1:])
+
     index = {"generated": iso(datetime.now(timezone.utc)), "t0": iso(t0), "ref": iso(ref), "obs": obs, "fc": fc}
+    if mix_block:
+        index["mix"] = mix_block
     if dwd_meta:
         index["dwd"] = dwd_meta
     if sat:
@@ -362,6 +381,8 @@ def main():
         keep |= {dwd_meta["fc"]} | {e["file"] for e in dwd_meta["obs"]}
         keep |= set(dwd_meta.get("map", {}).get("fc", [])) | {e["file"] for e in dwd_meta.get("map", {}).get("obs", [])}
     keep |= {e[k] for e in sat for k in ("file", *sky.TIERS) if k in e}
+    if mix_block:
+        keep |= {e["file"] for e in mix_block["obs"] + mix_block["fc"]} | {mix_block["knmi_win"]}
     keep |= {f for e in sat for f in (e.get("flow") or {}).values()} | set(motion.values())
     for p in [*OUT.glob("*.png"), *OUT.glob("*.jpg")]:
         if p.name not in keep:
