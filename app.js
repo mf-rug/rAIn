@@ -383,7 +383,7 @@ function makeRenderer(W, H) {
   const canvas = document.createElement('canvas');
   canvas.width = W; canvas.height = H;
   const gl = canvas.getContext('webgl', { premultipliedAlpha: true, alpha: true, antialias: false });
-  if (!gl) return { canvas, ok: false, frameTexture() {}, flowTexture() {}, draw() {}, drop() {} };
+  if (!gl) return { canvas, ok: false, frameTexture() {}, flowTexture() {}, draw() {}, drop() {}, setHole() {} };
 
   const compile = (type, src) => {
     const s = gl.createShader(type);
@@ -402,6 +402,7 @@ function makeRenderer(W, H) {
     uniform sampler2D a, b, flow, pal;
     uniform float t;
     uniform vec2 scale, px;
+    uniform vec4 hole;   // u0, v0, u1, v1: an area left transparent (another layer draws it)
     // Small 4-tap blur, so real frames are as soft as blended in-between ones
     // and playback doesn't pulse in sharpness every 5 minutes.
     float soft(sampler2D s, vec2 p) {
@@ -409,6 +410,7 @@ function makeRenderer(W, H) {
                    + texture2D(s, p + vec2(px.x, -px.y)).r + texture2D(s, p - px).r);
     }
     void main() {
+      if (uv.x > hole.x && uv.x < hole.z && uv.y > hole.y && uv.y < hole.w) { gl_FragColor = vec4(0.0); return; }
       // Rain at uv came from uv - f·t in frame A and is headed for uv + f·(1-t) in B.
       vec2 f = (texture2D(flow, uv).rg - 128.0 / 255.0) * scale;
       float va = soft(a, uv - f * t);
@@ -445,7 +447,8 @@ function makeRenderer(W, H) {
   // Flow byte → uv offset: (byte-128)/16 quarter pixels × 4 → pixels → uv.
   gl.uniform2f(u('scale'), 255 * 4 / 16 / W, 255 * 4 / 16 / H);
   gl.uniform2f(u('px'), 0.75 / W, 0.75 / H);
-  const uT = u('t');
+  const uT = u('t'), uHole = u('hole');
+  gl.uniform4f(uHole, 2, 2, 2, 2);
   gl.viewport(0, 0, W, H);
 
   return {
@@ -453,6 +456,7 @@ function makeRenderer(W, H) {
     frameTexture: (bytes) => texture(W, H, gl.LUMINANCE, bytes),
     flowTexture: (bytes) => texture(GX, GY, gl.RGBA, bytes),
     drop: (tex) => tex && gl.deleteTexture(tex),
+    setHole: (h) => gl.uniform4f(uHole, ...(h ?? [2, 2, 2, 2])),
     draw(a, b, flowTex, t) {
       gl.clearColor(0, 0, 0, 0);
       gl.clear(gl.COLOR_BUFFER_BIT);
@@ -468,18 +472,7 @@ function makeRenderer(W, H) {
 const gpu = makeRenderer(W, H);
 
 // Draw the current timeline position, warping between the two nearest frames.
-function drawRadar() {
-  // The chosen source's own layer when it's loaded (DWD, or KNMI alone next
-  // to the merged timeline); otherwise the timeline's frames rather than an
-  // empty map.
-  const src = mapShown();
-  const alt = src === 'dwd' ? dwd : src === 'knmi' && state.mix ? knmiAlone : null;
-  const useAlt = !!(alt?.renderer && alt.frames.some((f) => f.tex));
-  const r = useAlt ? alt.renderer : gpu;
-  gpu.canvas.style.visibility = useAlt ? 'hidden' : 'visible';
-  for (const x of [dwd, knmiAlone]) if (x.renderer) x.renderer.canvas.style.visibility = useAlt && x === alt ? 'visible' : 'hidden';
-  const fr = useAlt ? alt.frames : state.frames;
-  drawSat();
+function drawFrames(r, fr) {
   if (!fr.length) return r.draw(null);
   const i = Math.min(Math.floor(state.pos), fr.length - 1);
   const t = state.pos - i;
@@ -488,10 +481,30 @@ function drawRadar() {
   else if (a?.tex && t <= 0.5) r.draw(a.tex);
   else if (b?.tex) r.draw(b.tex);
   else r.draw(a?.tex ?? null);
-  // Further-ahead forecasts fade with today's reliability.
-  // In step with the reliability strip and the clouds (smoothed confidence at the point).
+}
+
+function drawRadar() {
+  // The chosen source's own layer when it's loaded (DWD, or KNMI alone next
+  // to the merged timeline); otherwise the timeline's frames rather than an
+  // empty map. "Both": the merged frames (KNMI's grid) plus DWD's frames
+  // around them, so the map covers both areas.
+  const src = mapShown();
+  const alt = src === 'dwd' ? dwd : src === 'knmi' && state.mix ? knmiAlone : null;
+  const ready = (x) => !!(x?.renderer && x.frames.some((f) => f.tex));
+  const useAlt = ready(alt);
+  const around = src === 'both' && state.mixDwd && ready(dwd);
+  gpu.canvas.style.visibility = useAlt ? 'hidden' : 'visible';
+  for (const x of [dwd, knmiAlone]) {
+    if (x.renderer) x.renderer.canvas.style.visibility = (useAlt && x === alt) || (around && x === dwd) ? 'visible' : 'hidden';
+  }
+  drawSat();
+  drawFrames(useAlt ? alt.renderer : gpu, useAlt ? alt.frames : state.frames);
+  if (around) drawFrames(dwd.renderer, dwd.frames);
+  // Further-ahead forecasts fade in step with the reliability strip and the
+  // clouds (smoothed confidence at the point).
   const n = useAlt || state.pos <= state.nowIdx ? null : confAt(state.pos);
   gpu.canvas.style.opacity = n == null ? 1 : trustOpacity(n, 0.35);
+  if (dwd.renderer) dwd.renderer.canvas.style.opacity = around ? gpu.canvas.style.opacity : 1;
 }
 
 // The map's corner label: measured (past), now, or forecast, with the time.
@@ -872,7 +885,8 @@ function dwdSeries(pt) {
 // built only while the DWD view is on.
 function syncDwdFrames() {
   const m = dwd.meta?.map;
-  if (mapShown() !== 'dwd' || !m) return;
+  const src = mapShown();
+  if (!m || !(src === 'dwd' || (src === 'both' && state.mixDwd))) return;
   if (!dwd.renderer || dwd.renderer.w !== m.w || dwd.renderer.h !== m.h) {
     dwd.overlay?.remove();
     dwd.renderer = Object.assign(makeRenderer(m.w, m.h), { w: m.w, h: m.h });
@@ -880,6 +894,9 @@ function syncDwdFrames() {
     dwd.overlay = new CanvasOverlay(dwd.renderer.canvas, bounds, { className: 'radar-frame', interactive: false }).addTo(map);
     dwd.built = new Map();
   }
+  // In "Both" the merged frames cover KNMI's grid; DWD draws only around it.
+  const ux = (x) => (x - m.x0) / (m.x1 - m.x0), vy = (y) => (m.y1 - y) / (m.y1 - m.y0);
+  dwd.renderer.setHole(src === 'both' ? [ux(X0), vy(Y1), ux(X1), vy(Y0)] : null);
   const ref = Date.parse(dwd.meta.ref);
   const obs = new Map(m.obs.map((o) => [Date.parse(o.t), o.file]));
   const keep = new Map();
@@ -1377,6 +1394,7 @@ async function update() {
   if (plan.coverage) store.set('coverage', plan.coverage);
   state.coverage.knmi = plan.coverage ?? store.get('coverage');
   state.mix = !!plan.mix;
+  state.mixDwd = plan.mixDwd ?? null;
   state.coverage.both = plan.mixCoverage ?? null;
   loadKnmi(plan.knmi);
   syncSourceButtons();

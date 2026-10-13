@@ -41,7 +41,9 @@ does and the data sources. This file is about how it's built and what bites.
   source alone elsewhere, weights ramped over ~20 km at each coverage edge;
   DWD left out when its run is >15 min older than KNMI's), on KNMI's grid.
   `knmi-win-*` = KNMI's forecast in the NL window for the readout; `coverage`
-  = union outline. The app uses `mix` as its timeline when present; the map
+  = union outline over both areas. On the map, "Both" draws the merged frames
+  plus DWD's full-area frames around them (the DWD renderer leaves KNMI's
+  grid transparent: `setHole`). The app uses `mix` as its timeline when present; the map
   toggle Both | KNMI | DWD changes only the map. verify.py scores the merged
   forecast (backfilled runs are still KNMI-only).
 - **Sky files:** `sat-*.jpg` (EUMETSAT GeoColour, radar grid's bbox, 1000×1072,

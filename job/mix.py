@@ -69,6 +69,28 @@ def ramp(mask):
     return np.minimum(1.0, d / FEATHER)
 
 
+def union_coverage(kvalid, dmask, m):
+    """Outline of KNMI's coverage (its grid) together with DWD's (its map grid),
+    traced on a Mercator grid spanning both at KNMI's resolution."""
+    res = (X1 - X0) / W
+    x0, x1 = min(X0, m["x0"]), max(X1, m["x1"])
+    y0, y1 = min(Y0, m["y0"]), max(Y1, m["y1"])
+    w, h = round((x1 - x0) / res), round((y1 - y0) / res)
+    xs = x0 + (np.arange(w) + 0.5) * res
+    ys = y1 - (np.arange(h) + 0.5) * res
+
+    def sample(mask, gx0, gy1, gw, gh, gres_x, gres_y):
+        c = np.floor((xs - gx0) / gres_x).astype(int)
+        r = np.floor((gy1 - ys) / gres_y).astype(int)
+        rr, cc = np.meshgrid(r, c, indexing="ij")
+        inside = (rr >= 0) & (rr < gh) & (cc >= 0) & (cc < gw)
+        return inside & mask[np.clip(rr, 0, gh - 1), np.clip(cc, 0, gw - 1)]
+    both = sample(kvalid, X0, Y1, W, H, res, (Y1 - Y0) / H) | sample(
+        dmask, m["x0"], m["y1"], m["w"], m["h"], (m["x1"] - m["x0"]) / m["w"], (m["y1"] - m["y0"]) / m["h"])
+    frame = np.where(both, 0, 255).astype(np.uint8)
+    return dwd.map_coverage(frame, {"x0": x0, "y0": y0, "x1": x0 + w * res, "y1": y1, "w": w, "h": h})
+
+
 def build(out, obs, fc, ref, dwd_meta, kvalid):
     """Merged frames for the timeline. obs/fc: KNMI's entries ({"t", "file"});
     ref: KNMI's run; kvalid: KNMI's coverage on the grid. Returns (index
@@ -152,9 +174,13 @@ def build(out, obs, fc, ref, dwd_meta, kvalid):
             frames.append(k)
         Image.fromarray(np.vstack(frames), "L").save(out / win, optimize=True)
 
-    # Where either source sees: the hatching's outline.
-    frame = np.where(kvalid | dvalid, 0, 255).astype(np.uint8)
-    rings = dwd.map_coverage(frame, {"x0": X0, "y0": Y0, "x1": X1, "y1": Y1, "w": W, "h": H})
+    # Where either source sees, over both areas (the app draws DWD's frames
+    # around the merged ones): the hatching's outline.
+    if use:
+        rings = union_coverage(kvalid, load(base) != 255, m)
+    else:
+        frame = np.where(kvalid, 0, 255).astype(np.uint8)
+        rings = dwd.map_coverage(frame, {"x0": X0, "y0": Y0, "x1": X1, "y1": Y1, "w": W, "h": H})
     block = {"obs": mix_obs, "fc": mix_fc, "dwd": dwd_meta["ref"] if use else None,
              "coverage": rings, "knmi_win": win, "win": dwd.WINDOW, "knmi_ref": f"{ref:%Y-%m-%dT%H:%M:%SZ}"}
     return block, grids
