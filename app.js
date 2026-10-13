@@ -489,8 +489,9 @@ function drawRadar() {
   else if (b?.tex) r.draw(b.tex);
   else r.draw(a?.tex ?? null);
   // Further-ahead forecasts fade with today's reliability.
-  const trust = useAlt ? null : trustAt(state.pos, 'rain');   // the timeline's, for the rain it shows
-  gpu.canvas.style.opacity = trust == null ? 1 : trustOpacity(confidence('rain', trust), 0.35);
+  // In step with the reliability strip and the clouds (smoothed confidence at the point).
+  const n = useAlt || state.pos <= state.nowIdx ? null : confAt(state.pos);
+  gpu.canvas.style.opacity = n == null ? 1 : trustOpacity(n, 0.35);
 }
 
 let drawQueued = false;
