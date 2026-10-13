@@ -85,6 +85,11 @@ does and the data sources. This file is about how it's built and what bites.
   only attached when `navigator.maxTouchPoints === 0`.
 - **Trackpad pinch** = ctrl+wheel (Chrome/Firefox) or gesture events (Safari);
   handled directly, proportional to the pinch. Leaflet's wheel zoom loses the speed.
+- **The graph's grid ends at ~10.9°E** (KNMI's, which the merged timeline
+  uses), while "Both" on the map reaches DWD's whole area. Points beyond it
+  (e.g. Berlin) read DWD's full-area frames (`offGrid`, `loadDwdPoint`);
+  their forecast ends where DWD's run does (`aheadOf`). Fixed 2026-10-13:
+  before, the graph showed dry there while the map showed rain.
 - **Big images on iOS:** keep single images well under ~16 Mpx (that's why DWD map
   frames are one file per step, not one atlas).
 - **Clouds are drawn from a cloud field, not the satellite photo** (rebuilt
