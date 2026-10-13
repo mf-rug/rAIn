@@ -716,6 +716,7 @@ function setPoint(pt, recenter) {
   $('place').textContent = pt.label;
   state.observed = new Map();
   loadObserved();
+  loadDwdPoint();
   loadBuienradar(true);
   highlightCountry(pt);
   render();
@@ -848,6 +849,7 @@ async function loadDwd(meta) {
     syncDwdFrames();
     syncSourceButtons();
     if (mapShown() === 'dwd') showCoverage();
+    loadDwdPoint();
     render();
   } catch (e) {
     console.warn('DWD unavailable', e);
@@ -878,6 +880,53 @@ function dwdSeries(pt) {
     if (b != null && b !== 255) out.set(f.t, fromByte(b));
   }
   return out;
+}
+
+// Outside KNMI's grid (the merged timeline's), only DWD's whole-area frames
+// (meta.map, its own grid) reach the point (e.g. Berlin), so the graph reads
+// those. Each frame's value at the point is read once and kept, not the frame.
+const dwdPt = { key: null, vals: new Map(), pending: false };   // file → mm/h (null: no data)
+
+function offGrid(pt) {
+  const [x, y] = pixelOf(pt);
+  return x < 1 || y < 1 || x >= W - 1 || y >= H - 1;
+}
+
+function dwdMapFile(t) {
+  const m = dwd.meta?.map;
+  if (!m) return null;
+  const ref = Date.parse(dwd.meta.ref);
+  if (t <= ref) return m.obs.find((o) => Date.parse(o.t) === t)?.file ?? null;
+  return m.fc[Math.round((t - ref) / STEP) - 1] ?? null;
+}
+
+function loadDwdPoint() {
+  const pt = state.point, m = dwd.meta?.map;
+  if (!pt || !m || !offGrid(pt)) return;
+  const x = pt.lng * 20037508.34 / 180;
+  const y = Math.log(Math.tan((90 + pt.lat) * Math.PI / 360)) * 6378137;
+  const cx = Math.floor((x - m.x0) / (m.x1 - m.x0) * m.w), cy = Math.floor((m.y1 - y) / (m.y1 - m.y0) * m.h);
+  const key = `${dwd.meta.base}|${cx},${cy}`;
+  if (dwdPt.key !== key) Object.assign(dwdPt, { key, vals: new Map() });
+  if (cx < 1 || cy < 1 || cx >= m.w - 1 || cy >= m.h - 1) return;
+  for (const f of state.frames) {
+    const file = dwdMapFile(f.t);
+    if (!file || dwdPt.vals.has(file)) continue;
+    dwdPt.vals.set(file, undefined);   // loading
+    greyImage(dwd.meta.base + file).then((bytes) => {
+      if (dwdPt.key !== key) return;
+      let sum = 0, n = 0;   // 3×3 mean, like sample()
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const b = bytes[(cy + dy) * m.w + cx + dx];
+        if (b !== 255) { sum += fromByte(b); n++; }
+      }
+      dwdPt.vals.set(file, n ? sum / n : null);
+      if (!dwdPt.pending) {
+        dwdPt.pending = true;
+        requestAnimationFrame(() => { dwdPt.pending = false; render(); });
+      }
+    }).catch((e) => { dwdPt.vals.delete(file); console.warn('DWD frame unavailable', file, e); });
+  }
 }
 
 // DWD's whole area on the map: its own grid and canvas (meta.map from the
@@ -1411,6 +1460,7 @@ async function update() {
   const dwdFiles = plan.dwd ? [plan.dwd.fc, ...plan.dwd.obs.map((o) => o.file), ...(plan.dwd.map?.fc ?? []), ...(plan.dwd.map?.obs ?? []).map((o) => o.file)] : [];
   const knmiFiles = plan.knmi ? [plan.knmi.win, ...[...plan.knmi.obs, ...plan.knmi.fc].map((e) => e.file)] : [];
   pruneCache(new Set([...next.map((f) => f.url), ...[...dwdFiles, ...knmiFiles].map((f) => DATA + f)]));
+  loadDwdPoint();
   syncDwdFrames();
   syncKnmiFrames();
 
@@ -1634,7 +1684,7 @@ function drawCompare() {
 function drawTrust(series) {
   const r = reliability(state.point);
   const p = $('trust');
-  const ahead = series.slice(state.nowIdx);
+  const ahead = aheadOf(series);
   if (!r || !ahead.length || ahead.some((v) => v === null)) { p.hidden = true; return; }
   p.hidden = false;
   const hours = (DEMO?.skill ?? state.skill).hours;
@@ -1701,6 +1751,9 @@ function intensity(v) {
 // Rain at the point per frame: measured for the past and now, forecast after.
 function pointSeries() {
   if (DEMO) return state.frames.map((f) => DEMO.rain((f.t - state.t0) / 60e3));
+  if (state.point && dwd.meta?.map && offGrid(state.point)) {
+    return state.frames.map((f) => dwdPt.vals.get(dwdMapFile(f.t)) ?? null);
+  }
   return state.frames.map((f, i) => {
     if (i <= state.nowIdx) {
       const v = state.observed.get(f.t);
@@ -1890,8 +1943,17 @@ function valueAt(series, pos) {
   return fromByte(Math.round(toByte(a) + (toByte(b) - toByte(a)) * t));
 }
 
+// From now on; off KNMI's grid only as far as DWD's run reaches (its last
+// step can be a frame short of the timeline's).
+function aheadOf(series) {
+  const ahead = series.slice(state.nowIdx);
+  if (!state.point || !dwd.meta?.map || !offGrid(state.point)) return ahead;
+  const n = state.frames.slice(state.nowIdx).findIndex((f) => !dwdMapFile(f.t));
+  return n > 0 ? ahead.slice(0, n) : ahead;
+}
+
 function drawVerdict(series) {
-  let ahead = series.slice(state.nowIdx);
+  let ahead = aheadOf(series);
   // KNMI unavailable: fall back to Buienradar's forecast for the verdict.
   if (ahead.some((v) => v === null) && loading.error) {
     const alt = state.frames.slice(state.nowIdx).map((f) => br.series.get(f.t) ?? null);
@@ -1928,7 +1990,7 @@ function verdictFor(ahead) {
     return;
   }
   const until = ahead.length - 1;
-  const endTime = hhmm(state.frames[state.frames.length - 1].t);
+  const endTime = hhmm(state.frames[state.nowIdx + until].t);
   const { wetNow, at, dryFrom } = turnOf(ahead);
 
   if (wetNow) {
