@@ -317,6 +317,30 @@ html, body {
   .mode::before { width: 5px; height: 5px; }
   .source { left: 10px; bottom: 10px; }
   .layer { left: 10px; bottom: 36px; }
+  .mapwrap .locate { padding: 5px 10px; font-size: 12px; right: 10px; bottom: 10px; }
+  .app { grid-template-columns: minmax(0, 1fr); }
+  .panel, .credits { min-width: 0; }
+}
+
+/* Phones: a compact panel, so the map keeps most of the screen. One-line
+   headline (app.js shrinks it to fit), smaller text, the play button on the
+   map, the 1-hour comparison inside the folded sources. */
+@media (max-width: 859px) {
+  .panel { padding: calc(env(safe-area-inset-top) + 10px) 16px 6px; }
+  .verdict { margin: 6px 0 0; font-size: 28px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-wrap: nowrap; }
+  .detail { margin-top: 3px; font-size: 14px; line-height: 1.3; min-height: 1.3em; }
+  .trust { margin-top: 3px; font-size: 12px; line-height: 1.3; }
+  #versus { display: none; }
+  .graph { margin-top: 8px; }
+  #graph { height: 104px; }
+  .readout { margin-top: 4px; min-height: 0; font-size: 12px; line-height: 1.25; }
+  .status { margin-top: 6px; padding: 5px 8px; font-size: 12px; line-height: 1.3; cursor: pointer; }
+  .mapwrap > .play { position: absolute; z-index: 500; top: 8px; right: 10px; width: 36px; height: 36px; box-shadow: 0 2px 10px rgb(0 0 0 / 0.08); }
+  .mapwrap > .play svg { width: 13px; height: 13px; }
+  .credits { padding: 4px 16px calc(env(safe-area-inset-bottom) + 4px); font-size: 10.5px; }
+}
+@media (min-width: 860px) {
+  .credits summary, #versus-more { display: none; }
 }
 
 .locate {
@@ -342,6 +366,11 @@ html, body {
   border-top: 1px solid var(--line);
 }
 .credits a { color: inherit; }
+.credits summary { cursor: pointer; list-style: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.credits summary::-webkit-details-marker { display: none; }
+.credits summary::after { content: " ▸"; }
+.credits details[open] summary::after { content: " ▾"; }
+.credit-text, #versus-more { margin: 4px 0 0; }
 
 #graph:focus { outline: none; }
 button:focus-visible, a:focus-visible, #graph:focus-visible {

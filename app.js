@@ -797,7 +797,7 @@ function locate() {
       clearTimeout(waiting);
       // Browsers give no second prompt once location is denied, so say where to fix it.
       const why = {
-        1: 'Location is blocked for this browser, so this shows De Bilt. On iPhone, allow it under Settings → Privacy & Security → Location Services → (your browser) → While Using the App. Or tap the map to pick a spot.',
+        1: 'Location is blocked, so this shows De Bilt. Tap the map to pick a spot, or allow it (iPhone: Settings → Privacy & Security → Location Services → your browser).',
         2: 'Your location isn’t available right now, so this shows De Bilt. Tap the map to pick a spot.',
         3: 'Finding your location took too long, so this shows De Bilt. Try “Use my location” again, or tap the map.',
       }[err.code] ?? 'Location is off, so this shows De Bilt. Tap the map to pick a spot.';
@@ -832,6 +832,7 @@ function showStatus(msg) {
   $('status').textContent = msg;
   $('status').hidden = !msg;
 }
+$('status').addEventListener('click', () => showStatus(''));   // tap to dismiss
 
 const hhmm = (t) => new Date(t).toLocaleTimeString('nl-NL', { hour: '2-digit', minute: '2-digit' });
 
@@ -1726,10 +1727,11 @@ function horizon(a, level) {
 function drawCompare() {
   const c = state.compare, p = $('versus');
   const k = c?.knmi?.[12], b = c?.br?.[12];
-  if (!k || !b) { p.hidden = true; return; }
-  p.hidden = false;
+  const more = $('versus-more');
+  if (!k || !b) { p.hidden = more.hidden = true; return; }
+  p.hidden = more.hidden = false;
   if (k.events < 150 || k.csi == null || b.csi == null) {
-    p.textContent = `Comparing KNMI and Buienradar forecasts: ${k.events} rain moments scored so far, results after a few rainy days.`;
+    p.textContent = more.textContent = `Comparing KNMI and Buienradar forecasts: ${k.events} rain moments scored so far, results after a few rainy days.`;
     return;
   }
   const pct = (v) => `${Math.round(v * 100)}%`;
@@ -1737,7 +1739,7 @@ function drawCompare() {
   const e = c.east, ek = e?.knmi?.[12], eb = e?.br?.[12], ed = e?.dwd?.[12];
   const east = ek && ed && ek.events >= 150 && ek.csi != null && eb.csi != null && ed.csi != null
     ? ` Eastern NL, where DWD covers too: KNMI ${pct(ek.csi)} · Buienradar ${pct(eb.csi)} · DWD ${pct(ed.csi)}.` : '';
-  p.textContent = `Rain correctly forecast 1 hour ahead (${days}): KNMI ${pct(k.csi)} · Buienradar ${pct(b.csi)}.${east}`;
+  p.textContent = more.textContent = `Rain correctly forecast 1 hour ahead (${days}): KNMI ${pct(k.csi)} · Buienradar ${pct(b.csi)}.${east}`;
 }
 
 // The reliability line describes the claim the headline makes: dry throughout,
@@ -1829,10 +1831,31 @@ function render() {
   const series = pointSeries();
   drawGraph(series);
   drawVerdict(series);
+  fitVerdict();
   drawTrust(series);
   drawCompare();
   drawReadout(series);
 }
+
+// Phones: one compact panel (style.css). The headline stays on one line,
+// shrinking to fit; the play button sits on the map (it animates the map);
+// the sources are folded, with the 1-hour comparison inside.
+const phone = matchMedia('(max-width: 859px)');
+function fitVerdict() {
+  const v = $('verdict');
+  v.style.fontSize = '';
+  if (!phone.matches) return;
+  for (let px = 28; px > 18 && v.scrollWidth > v.clientWidth; px -= 1) v.style.fontSize = `${px - 1}px`;
+}
+function placeControls() {
+  const play = $('play');
+  if (phone.matches) document.querySelector('.mapwrap').append(play);
+  else document.querySelector('.readout').prepend(play);
+  $('credits').open = !phone.matches;
+  fitVerdict();
+}
+phone.addEventListener('change', placeControls);
+placeControls();
 
 // Monotone cubic spline (Fritsch–Carlson) through [x, y] points: smooth, but
 // never overshoots, so dry stretches stay flat on the baseline.
@@ -2083,7 +2106,7 @@ function verdictFor(ahead) {
   $('verdict').innerHTML = `Dry until ${t(s)}`;
   $('detail').textContent = e < 0
     ? `Then ${intensity(peak)} rain, up to ${peak.toFixed(1)}\u00a0mm/h, lasting past ${endTime}.`
-    : `Then ${intensity(peak)} rain for about ${mins} minutes, up to ${peak.toFixed(1)}\u00a0mm/h.`;
+    : `Then ${intensity(peak)} rain for about ${mins} min, up to ${peak.toFixed(1)}\u00a0mm/h.`;
 }
 
 const cap = (s) => s[0].toUpperCase() + s.slice(1);
