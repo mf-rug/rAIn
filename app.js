@@ -683,16 +683,21 @@ async function highlightCountry(pt) {
   homeName = home?.properties.name ?? null;
   homeLayers.forEach((l) => l.remove());
   homeLayers = [];
-  if (!home || sat.on) return;
+  if (!home) return;
   const css = getComputedStyle(document.documentElement);
   const flip = (ring) => ring.map(([x, y]) => [y, x]);
   const world = [[30, -40], [30, 50], [75, 50], [75, -40]];
+  const outline = home.geometry.coordinates.map(([outer]) => flip(outer));
+  // Over clouds (grey on grey) the outline needs a halo and a darker line,
+  // and the veil is lighter, so clouds abroad still read.
   homeLayers = [
-    L.polygon([world, ...home.geometry.coordinates.map(([outer]) => flip(outer))], {
-      pane: 'veil', stroke: false, fillColor: css.getPropertyValue('--sky').trim(), fillOpacity: 0.55, interactive: false,
+    L.polygon([world, ...outline], {
+      pane: 'veil', stroke: false, fillColor: css.getPropertyValue('--sky').trim(), fillOpacity: sat.on ? 0.3 : 0.55, interactive: false,
     }),
-    L.polygon(home.geometry.coordinates.map(([outer]) => flip(outer)), {
-      pane: 'veil', fill: false, color: css.getPropertyValue('--muted').trim(), weight: 1.2, opacity: 0.6, interactive: false,
+    ...(sat.on ? [L.polygon(outline, { pane: 'veil', fill: false, color: css.getPropertyValue('--sky').trim(), weight: 4, opacity: 0.7, interactive: false })] : []),
+    L.polygon(outline, {
+      pane: 'veil', fill: false, color: css.getPropertyValue(sat.on ? '--ink' : '--muted').trim(),
+      weight: sat.on ? 1.6 : 1.2, opacity: sat.on ? 0.75 : 0.6, interactive: false,
     }),
   ];
   homeLayers.forEach((l) => l.addTo(map));
@@ -708,10 +713,14 @@ async function drawBorders() {
   if (!geo) return;
   bordersLayer?.remove();
   const css = getComputedStyle(document.documentElement);
-  bordersLayer = L.geoJSON(geo, {
-    pane: 'labels', interactive: false,
-    style: { color: css.getPropertyValue('--muted').trim(), weight: 1, opacity: dark.matches ? 0.85 : 0.6 },
-  }).addTo(map);
+  const line = (style) => L.geoJSON(geo, { pane: 'labels', interactive: false, style });
+  // Over clouds: a halo under a darker line (grey borders vanish on grey cloud).
+  bordersLayer = sat.on
+    ? L.layerGroup([
+      line({ color: css.getPropertyValue('--sky').trim(), weight: 3, opacity: 0.55 }),
+      line({ color: css.getPropertyValue('--ink').trim(), weight: 1, opacity: dark.matches ? 0.7 : 0.5 }),
+    ]).addTo(map)
+    : line({ color: css.getPropertyValue('--muted').trim(), weight: 1, opacity: dark.matches ? 0.85 : 0.6 }).addTo(map);
 }
 drawBorders();
 dark.addEventListener('change', drawBorders);
@@ -1220,7 +1229,7 @@ function makeCloudRenderer() {
       // Field → look: clear below ~0.15; cloud from grey (low, warm) to white
       // (high, cold), denser cloud more opaque.
       float d = clamp((f - 0.55) / 0.45, 0.0, 1.0);
-      float op = smoothstep(0.15, 0.55, f) * (0.62 + 0.3 * d) * alpha;
+      float op = smoothstep(0.15, 0.55, f) * (0.55 + 0.25 * d) * alpha;   // the map shows through even thick cloud
       gl_FragColor = vec4(mix(low, high, d) * op, op);
     }`));
   gl.linkProgram(prog);
@@ -1336,6 +1345,7 @@ function setClouds(on) {
   homeLayers.forEach((l) => l.remove());
   homeLayers = [];
   if (state.point) highlightCountry(state.point);
+  drawBorders();
   showCoverage();   // over clouds, no-radar areas get only the hatch lines
   requestDraw();
 }
