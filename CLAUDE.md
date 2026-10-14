@@ -90,6 +90,12 @@ does and the data sources. This file is about how it's built and what bites.
   (e.g. Berlin) read DWD's full-area frames (`offGrid`, `loadDwdPoint`);
   their forecast ends where DWD's run does (`aheadOf`). Fixed 2026-10-13:
   before, the graph showed dry there while the map showed rain.
+- **Never read data back from a canvas.** Safari (on by default since iOS 26)
+  adds noise to canvas readback (getImageData) against fingerprinting: DWD's
+  "no data" (255) came back as 254 etc. and showed as speckled rain in the
+  hatched area, on phones only. Data PNGs are decoded in JS (`pngBytes`:
+  8-bit, no palette, DecompressionStream); the canvas path is only a fallback
+  (and for WMS legend/frames). Textures straight from images are fine.
 - **Big images on iOS:** keep single images well under ~16 Mpx (that's why DWD map
   frames are one file per step, not one atlas).
 - **Clouds are drawn from a cloud field, not the satellite photo** (rebuilt

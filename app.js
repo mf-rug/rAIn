@@ -185,13 +185,66 @@ async function observedSeries(pt, from, to) {
 const CACHE = 'rain-frames-v1';
 const openCache = () => ('caches' in self ? caches.open(CACHE).catch(() => null) : Promise.resolve(null));
 
-async function cachedImage(url, opts) {
+async function cachedBlob(url) {
   const cache = await openCache();
   const hit = cache && await cache.match(url).catch(() => null);
-  if (hit) return createImageBitmap(await hit.blob(), opts);
+  if (hit) return hit.blob();
   const res = await get(url);
   if (cache) cache.put(url, res.clone()).catch(() => {});
-  return createImageBitmap(await res.blob(), opts);
+  return res.blob();
+}
+
+async function cachedImage(url, opts) {
+  return createImageBitmap(await cachedBlob(url), opts);
+}
+
+// The job's images hold data bytes (rain, DWD), decoded here rather than
+// read back from a canvas: Safari (iOS 26 on, by default) adds noise to canvas
+// readback against fingerprinting, which turned DWD's "no data" (255) into
+// speckles of heavy rain. 8-bit PNGs without palette; first channel.
+// → { w, h, bytes } or null (unsupported: the caller falls back to a canvas).
+async function pngBytes(blob) {
+  if (typeof DecompressionStream === 'undefined') return null;
+  const buf = new Uint8Array(await blob.arrayBuffer());
+  const dv = new DataView(buf.buffer);
+  if (dv.getUint32(0) !== 0x89504e47) return null;
+  let w = 0, h = 0, ch = 0;
+  const idat = [];
+  for (let o = 8; o + 8 <= buf.length;) {
+    const len = dv.getUint32(o), type = String.fromCharCode(...buf.subarray(o + 4, o + 8));
+    if (type === 'IHDR') {
+      w = dv.getUint32(o + 8); h = dv.getUint32(o + 12);
+      const depth = buf[o + 16], color = buf[o + 17], interlace = buf[o + 20];
+      ch = { 0: 1, 2: 3, 4: 2, 6: 4 }[color];
+      if (depth !== 8 || !ch || interlace) return null;
+    } else if (type === 'IDAT') idat.push(buf.subarray(o + 8, o + 8 + len));
+    else if (type === 'IEND') break;
+    o += 12 + len;
+  }
+  if (!w || !idat.length) return null;
+  const raw = new Uint8Array(await new Response(new Blob(idat).stream().pipeThrough(new DecompressionStream('deflate'))).arrayBuffer());
+  const stride = w * ch;
+  if (raw.length < h * (stride + 1)) return null;
+  const bytes = new Uint8Array(w * h);
+  let prev = new Uint8Array(stride), cur = new Uint8Array(stride);
+  for (let y = 0; y < h; y++) {
+    const f = raw[y * (stride + 1)], row = raw.subarray(y * (stride + 1) + 1, (y + 1) * (stride + 1));
+    for (let i = 0; i < stride; i++) {
+      const a = i >= ch ? cur[i - ch] : 0, b = prev[i], c = i >= ch ? prev[i - ch] : 0;
+      let v = row[i];
+      if (f === 1) v += a;
+      else if (f === 2) v += b;
+      else if (f === 3) v += (a + b) >> 1;
+      else if (f === 4) {
+        const pa = Math.abs(b - c), pb = Math.abs(a - c), pc = Math.abs(a + b - 2 * c);
+        v += pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
+      }
+      cur[i] = v;   // Uint8Array wraps mod 256
+    }
+    for (let x = 0; x < w; x++) bytes[y * w + x] = cur[x * ch];
+    [prev, cur] = [cur, prev];
+  }
+  return { w, h, bytes };
 }
 
 async function pruneCache(keep) {
@@ -248,14 +301,20 @@ function wmsUrl(kind, t, ref) {
 // hold the bytes; WMS frames are read back through the legend colours.
 async function loadFrame(f) {
   const data = f.src === 'data';
-  const img = await cachedImage(f.url, data ? { colorSpaceConversion: 'none', premultiplyAlpha: 'none' } : undefined);
-  const ctx = new OffscreenCanvas(W, H).getContext('2d', { willReadFrequently: true });
-  ctx.drawImage(img, 0, 0, W, H);
-  const d = ctx.getImageData(0, 0, W, H).data;
-  const bytes = new Uint8Array(W * H);
-  for (let i = 0, p = 0; i < bytes.length; i++, p += 4) {
-    if (data) bytes[i] = d[p];
-    else if (d[p + 3] >= 64) bytes[i] = invert(state.lut, d[p], d[p + 1], d[p + 2]);
+  const blob = await cachedBlob(f.url);
+  const png = data ? await pngBytes(blob).catch(() => null) : null;
+  let bytes;
+  if (png && png.w === W && png.h === H) bytes = png.bytes;
+  else {
+    const img = await createImageBitmap(blob, data ? { colorSpaceConversion: 'none', premultiplyAlpha: 'none' } : undefined);
+    const ctx = new OffscreenCanvas(W, H).getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(img, 0, 0, W, H);
+    const d = ctx.getImageData(0, 0, W, H).data;
+    bytes = new Uint8Array(W * H);
+    for (let i = 0, p = 0; i < bytes.length; i++, p += 4) {
+      if (data) bytes[i] = d[p];
+      else if (d[p + 3] >= 64) bytes[i] = invert(state.lut, d[p], d[p + 1], d[p + 2]);
+    }
   }
   f.bytes = bytes;
   f.tex = gpu.frameTexture(bytes);
@@ -828,7 +887,10 @@ async function loadBuienradar(force) {
 const dwd = { key: null, meta: null, fc: null, obs: new Map(), frames: [], built: new Map(), renderer: null, overlay: null };
 
 async function greyImage(url) {
-  const img = await cachedImage(url, { colorSpaceConversion: 'none', premultiplyAlpha: 'none' });
+  const blob = await cachedBlob(url);
+  const png = await pngBytes(blob).catch(() => null);
+  if (png) return png.bytes;
+  const img = await createImageBitmap(blob, { colorSpaceConversion: 'none', premultiplyAlpha: 'none' });
   const ctx = new OffscreenCanvas(img.width, img.height).getContext('2d', { willReadFrequently: true });
   ctx.drawImage(img, 0, 0);
   const d = ctx.getImageData(0, 0, img.width, img.height).data;
@@ -1954,6 +2016,14 @@ function aheadOf(series) {
 
 function drawVerdict(series) {
   let ahead = aheadOf(series);
+  // Off KNMI's grid, DWD's frames are all read but have no data at the point
+  // (outside its area, or a radar out): say so instead of waiting.
+  if (state.point && dwd.meta?.map && offGrid(state.point) && ahead.some((v) => v === null) &&
+      state.frames.slice(state.nowIdx, state.nowIdx + ahead.length).every((f) => dwdPt.vals.get(dwdMapFile(f.t)) !== undefined)) {
+    $('verdict').textContent = 'No radar data here';
+    $('detail').textContent = 'DWD’s latest run has no data for this spot (outside its radars’ reach, or a radar is out).';
+    return;
+  }
   // KNMI unavailable: fall back to Buienradar's forecast for the verdict.
   if (ahead.some((v) => v === null) && loading.error) {
     const alt = state.frames.slice(state.nowIdx).map((f) => br.series.get(f.t) ?? null);
