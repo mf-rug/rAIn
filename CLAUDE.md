@@ -7,7 +7,7 @@ does and the data sources. This file is about how it's built and what bites.
 
 | Path | What |
 |---|---|
-| `index.html`, `style.css`, `app.js` | The whole app. Plain JS, no build step, Leaflet 1.9.4 from unpkg. |
+| `index.html`, `style.css`, `app.js` | The whole app. Plain JS, no build step, Leaflet 1.9.4 from unpkg; basemap via MapLibre 5.24 + maplibre-gl-leaflet. |
 | `job/build.py` | Scheduled job: KNMI frames, index.json, coverage, calls the modules below. |
 | `job/verify.py` | Forecast reliability (CSI at ~4 km, per ~40 km tile, last 6 h) → skill.json. |
 | `job/compare.py` | KNMI vs Buienradar vs DWD (+ consensus) at 32 places → compare.json. |
@@ -96,6 +96,13 @@ does and the data sources. This file is about how it's built and what bites.
   hatched area, on phones only. Data PNGs are decoded in JS (`pngBytes`:
   8-bit, no palette, DecompressionStream); the canvas path is only a fallback
   (and for WMS legend/frames). Textures straight from images are fine.
+- **Basemap = OpenFreeMap vector tiles in our own colours** (since 2026-10-16;
+  `MAP_COLORS` in app.js: light "sage", dark "warm"), because Esri's grey map
+  and grey clouds blended together. Roads, railways, buildings and the style's
+  own borders are dropped (`MAP_DROP`); our Natural Earth borders and the home
+  veil stay. Two MapLibre maps via maplibre-gl-leaflet: land/water in the tile
+  pane, labels only in the labels pane (over clouds and radar). MapLibre 6 has
+  no UMD build, hence 5.x. Falls back to Esri raster tiles if MapLibre fails.
 - **Big images on iOS:** keep single images well under ~16 Mpx (that's why DWD map
   frames are one file per step, not one atlas).
 - **Clouds are drawn from a cloud field, not the satellite photo** (rebuilt

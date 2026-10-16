@@ -643,15 +643,63 @@ map.getPane('labels').style.zIndex = 450;
 map.getPane('labels').style.pointerEvents = 'none';
 new CanvasOverlay(gpu.canvas, BOUNDS, { className: 'radar-frame', interactive: false }).addTo(map);
 
+// Basemap: OpenFreeMap's vector tiles (OpenStreetMap data), drawn by MapLibre
+// in our own colours, so the grey clouds don't vanish into a grey map. Land
+// and water only, no roads or railways (borders are our own, below). Labels
+// are a second, labels-only map in the labels pane, over clouds and radar.
+// Without MapLibre (or if it fails), Esri's grey raster tiles as before.
 const dark = matchMedia('(prefers-color-scheme: dark)');
-let baseLayers = [];
-function setBasemap() {
+const MAP_COLORS = {
+  light: {   // sage
+    land: '#E5EAE0', water: '#B3C9D6', wood: '#D6E0CF', park: '#D6E0CF', residential: '#DEE3D8',
+    label: '#46534C', halo: '#EEF2EA', waterLabel: '#557385',
+  },
+  dark: {    // warm
+    land: '#27231F', water: '#121B24', wood: '#24221C', park: '#24221C', residential: '#2C2823',
+    label: '#B9AFA2', halo: '#1A1714', waterLabel: '#6A8296',
+  },
+};
+const MAP_DROP = /^(highway|tunnel|bridge|railway|road|aeroway|airport|boundary|building|landcover_ice|landcover_glacier)/;
+const MAP_ROLES = [
+  [/^background$/, 'land', 'background-color'], [/^water$/, 'water', 'fill-color'], [/^waterway$/, 'water', 'line-color'],
+  [/^landcover_wood$/, 'wood', 'fill-color'], [/^(park|landuse_park)$/, 'park', 'fill-color'],
+  [/^landuse_residential$/, 'residential', 'fill-color'],
+];
+const mapStyles = {};
+async function vectorStyles(isDark) {
+  const name = isDark ? 'dark' : 'positron';
+  mapStyles[name] ??= get(`https://tiles.openfreemap.org/styles/${name}`).then((r) => r.json());
+  const s = structuredClone(await mapStyles[name]), c = MAP_COLORS[isDark ? 'dark' : 'light'];
+  const layers = s.layers.filter((l) => !MAP_DROP.test(l.id));
+  for (const l of layers) {
+    for (const [re, role, prop] of MAP_ROLES) if (re.test(l.id)) l.paint = { ...l.paint, [prop]: c[role] };
+    if (l.type === 'symbol') {
+      l.paint = { ...l.paint, 'text-color': l.id.startsWith('water') ? c.waterLabel : c.label, 'text-halo-color': c.halo };
+    }
+  }
+  return [{ ...s, layers: layers.filter((l) => l.type !== 'symbol') }, { ...s, layers: layers.filter((l) => l.type === 'symbol') }];
+}
+
+let baseLayers = [], baseGen = 0;
+async function setBasemap() {
+  const gen = ++baseGen;
+  let next;
+  try {
+    if (!L.maplibreGL || !self.maplibregl) throw new Error('MapLibre not loaded');
+    const [base, labels] = await vectorStyles(dark.matches);
+    const gl = (style, pane) => L.maplibreGL({ style, pane, interactive: false, attributionControl: false });
+    next = [gl(base, 'tilePane'), gl(labels, 'labels')];
+  } catch (e) {
+    console.warn('vector basemap unavailable, using Esri tiles', e);
+    const canvas = `https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_${dark.matches ? 'Dark' : 'Light'}_Gray`;
+    next = [
+      L.tileLayer(`${canvas}_Base/MapServer/tile/{z}/{y}/{x}`),
+      L.tileLayer(`${canvas}_Reference/MapServer/tile/{z}/{y}/{x}`, { pane: 'labels' }),
+    ];
+  }
+  if (gen !== baseGen) return;
   baseLayers.forEach((l) => l.remove());
-  const canvas = `https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_${dark.matches ? 'Dark' : 'Light'}_Gray`;
-  baseLayers = [
-    L.tileLayer(`${canvas}_Base/MapServer/tile/{z}/{y}/{x}`),
-    L.tileLayer(`${canvas}_Reference/MapServer/tile/{z}/{y}/{x}`, { pane: 'labels' }),
-  ];
+  baseLayers = next;
   baseLayers.forEach((l) => l.addTo(map));
 }
 setBasemap();

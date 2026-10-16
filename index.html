@@ -17,6 +17,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Sans+Condensed:wght@500&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -68,19 +69,21 @@
 
     <footer class="credits">
       <details id="credits">
-        <summary>Sources: KNMI, DWD, EUMETSAT, Buienradar · © OpenStreetMap</summary>
+        <summary>Sources: KNMI, DWD, EUMETSAT, Buienradar · map © OpenStreetMap</summary>
         <p id="versus-more" class="trust" hidden></p>
         <p class="credit-text">
           Radar and forecast: <a href="https://dataplatform.knmi.nl">KNMI</a> and <a href="https://www.dwd.de">DWD</a>, CC BY 4.0 ·
           Comparison: <a href="https://www.buienradar.nl">Buienradar</a> ·
           Clouds: contains modified <a href="https://www.eumetsat.int">EUMETSAT</a> Meteosat data (cloud mask, infrared) · Sunshine: KNMI stations ·
-          Map: Esri, HERE, Garmin, © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors · Borders: Natural Earth
+          Map: <a href="https://openfreemap.org">OpenFreeMap</a> © <a href="https://www.openmaptiles.org/">OpenMapTiles</a>, data © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors (fallback: Esri) · Borders: Natural Earth
         </p>
       </details>
     </footer>
   </main>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></script>
+  <script src="https://unpkg.com/@maplibre/maplibre-gl-leaflet@0.1.4/leaflet-maplibre-gl.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

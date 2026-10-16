@@ -69,7 +69,8 @@ Buienradar ─────┘                    compare.json, coverage.json
 | [KNMI Data Platform](https://dataplatform.knmi.nl) | 10-minute station observations (sunshine) | CC BY 4.0 |
 | [Open-Meteo](https://open-meteo.com) | Weather models' sun forecasts, scored by the job (not shown yet) | CC BY 4.0 |
 | [Natural Earth](https://www.naturalearthdata.com) | Country highlight, borders and coasts | Public domain |
-| Esri, HERE, Garmin, © OpenStreetMap contributors | Basemap tiles (Esri World Gray Canvas) | Esri basemap terms |
+| [OpenFreeMap](https://openfreemap.org), © OpenMapTiles, © OpenStreetMap contributors | Basemap (vector tiles, our own colours: land, water, labels; no roads) | Free, no key; attribution |
+| Esri, HERE, Garmin, © OpenStreetMap contributors | Fallback basemap when MapLibre can't run (Esri World Gray Canvas) | Esri basemap terms |
 
 ## Setup (for a fork)
 
