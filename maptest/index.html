@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Map colour test</title>
+<link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+<style>
+  html, body { margin: 0; height: 100%; font: 13px/1.3 system-ui, sans-serif; background: #E6ECEF; color: #18242A; }
+  body.dark { background: #0E161A; color: #E3EBEE; }
+  #map { position: absolute; inset: 0 0 0 0; }
+  .bar { position: absolute; z-index: 5; left: 8px; right: 8px; top: 8px; display: flex; flex-wrap: wrap; gap: 6px; }
+  .bar button { padding: 6px 10px; border: 1px solid #C9D3D8; border-radius: 999px; background: #F5F8F9; color: #18242A; font: 600 12px system-ui; }
+  .bar button[aria-pressed="true"] { background: #18242A; color: #F5F8F9; }
+  .note { position: absolute; z-index: 5; left: 8px; bottom: 8px; max-width: 360px; padding: 6px 10px; border-radius: 8px; background: rgb(245 248 249 / 0.9); color: #18242A; }
+  body.dark .note { background: rgb(20 32 38 / 0.9); color: #E3EBEE; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div class="bar" id="bar"></div>
+<div class="note" id="note"></div>
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<script>
+// Palettes for OpenFreeMap's "positron" (light) and "dark" vector styles.
+// Every value here is a separate, freely chosen colour.
+const PALETTES = {
+  'Light · now (Esri)': { esri: 'Light' },
+  'Light · sand': {
+    base: 'positron', land: '#EEE8DC', water: '#BCD2DD', wood: '#E1E4D0', park: '#E1E4D0', residential: '#E9E2D4',
+    building: '#E3DACA', road: '#FBF8F2', major: '#F4EBDD', motorway: '#EEDCC0', casing: '#E2D6C4', rail: '#D8CDBD',
+    border: '#9A8C7A', label: '#5B5348', halo: '#F4F0E8', waterLabel: '#5E7E8E',
+  },
+  'Light · sage': {
+    base: 'positron', land: '#E5EAE0', water: '#B3C9D6', wood: '#D6E0CF', park: '#D6E0CF', residential: '#DEE3D8',
+    building: '#D5DBCF', road: '#F6F8F3', major: '#EEF1EA', motorway: '#E2E2D0', casing: '#D2D9CC', rail: '#C9D0C3',
+    border: '#7C8B80', label: '#46534C', halo: '#EEF2EA', waterLabel: '#557385',
+  },
+  'Dark · now (Esri)': { esri: 'Dark' },
+  'Dark · green-grey': {
+    base: 'dark', land: '#1E2622', water: '#0D1A24', wood: '#1B241F', park: '#1B241F', residential: '#222A26',
+    building: '#262E2A', road: '#29312D', major: '#2F3833', motorway: '#3A3F35', casing: '#1E2622', rail: '#2E3631',
+    border: '#7F9188', label: '#A7B4AD', halo: '#141B18', waterLabel: '#5F7C8C',
+  },
+  'Dark · warm': {
+    base: 'dark', land: '#27231F', water: '#121B24', wood: '#24221C', park: '#24221C', residential: '#2C2823',
+    building: '#302B25', road: '#332E28', major: '#3B352E', motorway: '#463D30', casing: '#27231F', rail: '#38322B',
+    border: '#9A8E7E', label: '#B9AFA2', halo: '#1A1714', waterLabel: '#6A8296',
+  },
+};
+
+// Which style layers each palette entry colours (by id prefix).
+const ROLES = [
+  ['background', 'land', 'background-color'],
+  ['water', 'water', 'fill-color'],
+  ['waterway', 'water', 'line-color'],
+  ['landcover_wood', 'wood', 'fill-color'],
+  ['park', 'park', 'fill-color'], ['landuse_park', 'park', 'fill-color'],
+  ['landuse_residential', 'residential', 'fill-color'],
+  ['building', 'building', 'fill-color'],
+  ['highway_path', 'road', 'line-color'], ['highway_minor', 'road', 'line-color'],
+  ['highway_major_inner', 'major', 'line-color'], ['highway_major_subtle', 'major', 'line-color'],
+  ['highway_major_casing', 'casing', 'line-color'],
+  ['highway_motorway_inner', 'motorway', 'line-color'], ['highway_motorway_subtle', 'motorway', 'line-color'],
+  ['highway_motorway_bridge_inner', 'motorway', 'line-color'],
+  ['highway_motorway_casing', 'casing', 'line-color'], ['highway_motorway_bridge_casing', 'casing', 'line-color'],
+  ['railway', 'rail', 'line-color'],
+  ['boundary', 'border', 'line-color'],
+];
+
+let overlays;
+const styles = {};
+async function styleFor(p) {
+  if (p.esri) {
+    const u = `https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_${p.esri}_Gray`;
+    return {
+      version: 8,
+      sources: {
+        base: { type: 'raster', tiles: [`${u}_Base/MapServer/tile/{z}/{y}/{x}`], tileSize: 256 },
+        ref: { type: 'raster', tiles: [`${u}_Reference/MapServer/tile/{z}/{y}/{x}`], tileSize: 256 },
+      },
+      layers: [{ id: 'base', type: 'raster', source: 'base' }, { id: 'ref', type: 'raster', source: 'ref' }],
+    };
+  }
+  styles[p.base] ??= await (await fetch(`https://tiles.openfreemap.org/styles/${p.base === 'dark' ? 'dark' : 'positron'}`)).json();
+  const s = structuredClone(styles[p.base]);
+  for (const l of s.layers) {
+    for (const [prefix, role, prop] of ROLES) {
+      if (l.id === prefix || l.id.startsWith(prefix + '_') || l.id.startsWith(prefix + '-') || (prefix === 'railway' && l.id.startsWith('railway'))) {
+        if (p[role] && (l.type === prop.split('-')[0] || l.type === 'background')) { l.paint ??= {}; l.paint[prop] = p[role]; }
+      }
+    }
+    if (l.type === 'symbol') {
+      l.paint ??= {};
+      const water = l.id.startsWith('water');
+      l.paint['text-color'] = water ? p.waterLabel : p.label;
+      l.paint['text-halo-color'] = p.halo;
+    }
+  }
+  s.layers = s.layers.filter((l) => !l.id.startsWith('landcover_ice') && !l.id.startsWith('landcover_glacier'));
+  return s;
+}
+
+function addOverlays(map, dark) {
+  // Over land, water and roads; under borders and labels (as in the app).
+  const firstSymbol = map.getStyle().layers.find((l) => l.id.startsWith('boundary') || l.id === 'ref')?.id;
+  map.addSource('clouds', { type: 'image', url: `clouds_${dark ? 'dark' : 'light'}.png`, coordinates: overlays.corners.clouds });
+  map.addLayer({ id: 'clouds', type: 'raster', source: 'clouds', paint: { 'raster-fade-duration': 0, 'raster-resampling': 'linear' } }, firstSymbol);
+  map.addSource('rain', { type: 'image', url: 'rain.png', coordinates: overlays.corners.rain });
+  map.addLayer({ id: 'rain', type: 'raster', source: 'rain', paint: { 'raster-fade-duration': 0 } }, firstSymbol);
+  map.setLayoutProperty('clouds', 'visibility', showClouds ? 'visible' : 'none');
+}
+
+let map, current = new URLSearchParams(location.search).get('p') ?? 'Light · sand', showClouds = true;
+async function show(name) {
+  current = name;
+  const p = PALETTES[name], dark = name.startsWith('Dark');
+  document.body.classList.toggle('dark', dark);
+  const style = await styleFor(p);
+  const view = map ? { center: map.getCenter(), zoom: map.getZoom() } : { center: [6.5, 52], zoom: 5.6 };
+  map?.remove();
+  map = new maplibregl.Map({ container: 'map', style, ...view, attributionControl: false, fadeDuration: 0 });
+  map.on('load', () => addOverlays(map, dark));
+  for (const b of document.querySelectorAll('.bar button[data-p]')) b.setAttribute('aria-pressed', String(b.dataset.p === name));
+  document.getElementById('note').textContent =
+    `${name}. Clouds: satellite ${overlays.clouds_t.slice(11, 16)} UTC; rain: DWD ${overlays.rain_t.slice(11, 16)} UTC. ` +
+    (p.esri ? 'Fixed images: colours can only be tinted as a whole.' : 'Vector tiles (OpenFreeMap, © OpenStreetMap): every colour set separately.');
+}
+
+(async () => {
+  overlays = await (await fetch('overlays.json')).json();
+  const bar = document.getElementById('bar');
+  for (const name of Object.keys(PALETTES)) {
+    const b = document.createElement('button');
+    b.textContent = name; b.dataset.p = name; b.onclick = () => show(name);
+    bar.append(b);
+  }
+  const c = document.createElement('button');
+  c.textContent = 'Clouds'; c.setAttribute('aria-pressed', 'true');
+  c.onclick = () => { showClouds = !showClouds; c.setAttribute('aria-pressed', String(showClouds)); map.setLayoutProperty('clouds', 'visibility', showClouds ? 'visible' : 'none'); };
+  bar.append(c);
+  show(current);
+})();
+</script>
+</body>
+</html>
