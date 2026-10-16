@@ -710,6 +710,9 @@ dark.addEventListener('change', setBasemap);
 map.createPane('veil');
 map.getPane('veil').style.zIndex = 350;
 map.getPane('veil').style.pointerEvents = 'none';
+map.createPane('home');                              // the home outline over clouds: above the borders
+map.getPane('home').style.zIndex = 460;
+map.getPane('home').style.pointerEvents = 'none';
 const countries = fetch('countries.geojson').then((r) => r.json()).catch(() => null);
 let homeLayers = [], homeName = null;
 
@@ -736,17 +739,17 @@ async function highlightCountry(pt) {
   const flip = (ring) => ring.map(([x, y]) => [y, x]);
   const world = [[30, -40], [30, 50], [75, 50], [75, -40]];
   const outline = home.geometry.coordinates.map(([outer]) => flip(outer));
-  // Over clouds (grey on grey) the outline needs a halo and a darker line,
-  // and the veil is lighter, so clouds abroad still read.
+  // Over clouds the veil hardly shows (and is lighter, so clouds abroad still
+  // read): the home outline is cased instead, a wide dark line with a light
+  // one inside, over the other borders (which are quieter then).
+  const line = (pane, color, weight, opacity) => L.polygon(outline, { pane, fill: false, color, weight, opacity, interactive: false });
   homeLayers = [
     L.polygon([world, ...outline], {
       pane: 'veil', stroke: false, fillColor: css.getPropertyValue('--sky').trim(), fillOpacity: sat.on ? 0.3 : 0.55, interactive: false,
     }),
-    ...(sat.on ? [L.polygon(outline, { pane: 'veil', fill: false, color: css.getPropertyValue('--sky').trim(), weight: 4, opacity: 0.7, interactive: false })] : []),
-    L.polygon(outline, {
-      pane: 'veil', fill: false, color: css.getPropertyValue(sat.on ? '--ink' : '--muted').trim(),
-      weight: sat.on ? 1.6 : 1.2, opacity: sat.on ? 0.75 : 0.6, interactive: false,
-    }),
+    ...(sat.on
+      ? [line('home', css.getPropertyValue('--ink').trim(), 5, dark.matches ? 0.8 : 0.6), line('home', css.getPropertyValue('--paper').trim(), 1.8, 0.95)]
+      : [line('veil', css.getPropertyValue('--muted').trim(), 1.2, 0.6)]),
   ];
   homeLayers.forEach((l) => l.addTo(map));
 }
@@ -762,11 +765,12 @@ async function drawBorders() {
   bordersLayer?.remove();
   const css = getComputedStyle(document.documentElement);
   const line = (style) => L.geoJSON(geo, { pane: 'labels', interactive: false, style });
-  // Over clouds: a halo under a darker line (grey borders vanish on grey cloud).
+  // Over clouds: a faint halo under a darker line (grey borders vanish on grey
+  // cloud), kept quieter than the home country's cased outline.
   bordersLayer = sat.on
     ? L.layerGroup([
-      line({ color: css.getPropertyValue('--sky').trim(), weight: 3, opacity: 0.55 }),
-      line({ color: css.getPropertyValue('--ink').trim(), weight: 1, opacity: dark.matches ? 0.7 : 0.5 }),
+      line({ color: css.getPropertyValue('--sky').trim(), weight: 2.5, opacity: 0.35 }),
+      line({ color: css.getPropertyValue('--ink').trim(), weight: 0.8, opacity: dark.matches ? 0.55 : 0.4 }),
     ]).addTo(map)
     : line({ color: css.getPropertyValue('--muted').trim(), weight: 1, opacity: dark.matches ? 0.85 : 0.6 }).addTo(map);
 }
