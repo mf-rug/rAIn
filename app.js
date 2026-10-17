@@ -1919,6 +1919,18 @@ function placeControls() {
 phone.addEventListener('change', placeControls);
 placeControls();
 
+// Phones: the tab on the map's top edge trades about half the map for a
+// taller chart (remembered per device).
+function setTallGraph(on) {
+  document.body.classList.toggle('tall-graph', on);
+  $('split').setAttribute('aria-pressed', String(on));
+  $('split').setAttribute('aria-label', on ? 'Bigger map' : 'Bigger chart');
+  store.set('tallgraph', on);
+  map.invalidateSize({ pan: false });
+  render();
+}
+$('split').addEventListener('click', () => setTallGraph(!document.body.classList.contains('tall-graph')));
+
 // Monotone cubic spline (Fritsch–Carlson) through [x, y] points: smooth, but
 // never overshoots, so dry stretches stay flat on the baseline.
 function monotonePath(pts) {
@@ -2253,6 +2265,12 @@ addEventListener('resize', render);
 if (!gpu.ok) showStatus('This browser can’t draw the radar map (WebGL is unavailable).');
 state.mapSource = store.get('mapsrc') ?? 'both';
 syncSourceButtons();
+if (store.get('tallgraph') === true) {
+  document.body.classList.add('tall-graph');
+  $('split').setAttribute('aria-pressed', 'true');
+  $('split').setAttribute('aria-label', 'Bigger map');
+  map.invalidateSize({ pan: false });
+}
 sat.on = store.get('clouds') === true;
 $('clouds').setAttribute('aria-pressed', String(sat.on));
 startLoading();
