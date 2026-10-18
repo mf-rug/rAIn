@@ -1517,17 +1517,37 @@ function drawWetDots() {
     const p = x.pts.find((q) => t > q.t - 10 * 60e3 && t <= q.t) ?? (t > x.pts[x.pts.length - 1].t && t - x.pts[x.pts.length - 1].t < 20 * 60e3 ? x.pts[x.pts.length - 1] : null);
     return p?.kind ? [x, p.kind] : null;
   }).filter(Boolean);
-  const key = on.map(([x, k]) => x.sid + k).join() + dark.matches;
+  $('drizzle').hidden = !wetStations().length;
+  const key = state.wetOn + on.map(([x, k]) => x.sid + k).join() + dark.matches;
   if (key === wetKey) return;
   wetKey = key;
   wetLayer?.remove();
+  wetLayer = null;
+  if (!state.wetOn) return;
   const css = getComputedStyle(document.documentElement);
-  wetLayer = L.layerGroup(on.map(([x, k]) => L.circleMarker([x.lat, x.lng], {
-    pane: 'wet', interactive: false, radius: k === 'drizzle' ? 4 : 5, weight: 1.5,
-    color: css.getPropertyValue('--paper').trim(), fillOpacity: 1,
-    fillColor: css.getPropertyValue(k === 'drizzle' ? '--drizzle' : '--rain').trim(),
-  }))).addTo(map);
+  // A soft disc of ~WET_KM / 2 around each station (roughly how far one
+  // report goes: drizzle is patchy), and the station itself.
+  wetLayer = L.layerGroup(on.flatMap(([x, k]) => {
+    const fill = css.getPropertyValue(k === 'drizzle' ? '--drizzle' : '--rain').trim();
+    return [
+      L.circle([x.lat, x.lng], { pane: 'wet', interactive: false, radius: WET_KM * 500, stroke: false, fillColor: fill, fillOpacity: 0.28 }),
+      L.circleMarker([x.lat, x.lng], {
+        pane: 'wet', interactive: false, radius: 5, weight: 1.5,
+        color: css.getPropertyValue('--paper').trim(), fillColor: fill, fillOpacity: 1,
+      }),
+    ];
+  })).addTo(map);
 }
+
+function setWet(on) {
+  state.wetOn = on;
+  store.set('drizzle', on);
+  $('drizzle').setAttribute('aria-pressed', String(on));
+  requestDraw();
+}
+state.wetOn = store.get('drizzle') !== false;
+$('drizzle').setAttribute('aria-pressed', String(state.wetOn));
+$('drizzle').addEventListener('click', () => setWet(!state.wetOn));
 
 // Sun at time t from the series ("sunny", "some sun", "no sun"), or null.
 function sunWord(sun, t) {
