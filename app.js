@@ -1515,7 +1515,7 @@ function drawWetDots() {
   const on = t == null ? [] : wetStations().map((x) => {
     // The report covering t (10-minute reports), or the latest one within 20 minutes for "now".
     const p = x.pts.find((q) => t > q.t - 10 * 60e3 && t <= q.t) ?? (t > x.pts[x.pts.length - 1].t && t - x.pts[x.pts.length - 1].t < 20 * 60e3 ? x.pts[x.pts.length - 1] : null);
-    return p?.kind ? [x, p.kind] : null;
+    return p ? [x, p.kind ?? 'dry'] : null;
   }).filter(Boolean);
   $('drizzle').hidden = !wetStations().length;
   const key = state.wetOn + on.map(([x, k]) => x.sid + k).join() + dark.matches;
@@ -1525,9 +1525,16 @@ function drawWetDots() {
   wetLayer = null;
   if (!state.wetOn) return;
   const css = getComputedStyle(document.documentElement);
-  // A soft disc of ~WET_KM / 2 around each station (roughly how far one
-  // report goes: drizzle is patchy), and the station itself.
+  // Every reporting station, so the spread shows: dry ones as small rings;
+  // wet ones as a dot with a soft disc of ~WET_KM / 2 (roughly how far one
+  // report goes: drizzle is patchy).
   wetLayer = L.layerGroup(on.flatMap(([x, k]) => {
+    if (k === 'dry') {
+      return [L.circleMarker([x.lat, x.lng], {
+        pane: 'wet', interactive: false, radius: 3.5, weight: 1.5,
+        color: css.getPropertyValue('--muted').trim(), opacity: 0.8, fillColor: css.getPropertyValue('--paper').trim(), fillOpacity: 0.9,
+      })];
+    }
     const fill = css.getPropertyValue(k === 'drizzle' ? '--drizzle' : '--rain').trim();
     return [
       L.circle([x.lat, x.lng], { pane: 'wet', interactive: false, radius: WET_KM * 500, stroke: false, fillColor: fill, fillOpacity: 0.28 }),
