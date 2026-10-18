@@ -148,9 +148,12 @@ does and the data sources. This file is about how it's built and what bites.
   cloud drizzled only 18% and infrared doesn't separate it; nearest station
   (~33 km) agreed on drizzle only 20% (patchy: no filled-in map); still wet
   60 min later 58% vs 23% baseline. So the app shows station dots (past hour
-  to now), strip marks, "Drizzle now" when a station ≤20 km (`WET_KM`)
+  to now; dry ones as rings), strip marks, "Drizzle now" when a station ≤20 km (`WET_KM`)
   reports it and the radar is dry here, and "drizzle possible" until the
-  drifted cloud over that station drops below `CLEAR_BELOW`.
+  drifted cloud over that station drops below `CLEAR_BELOW`. WaWa 22
+  ("drizzle in the past hour, not now") counts as drizzle "on and off"
+  (paler): on 2026-10-18 Eelde's sensor showed such gaps when drops got too
+  fine to detect, while it felt like being inside the cloud all day.
 - **Weather models' sun at a point was poor on the first check** (2026-10-13:
   HARMONIE missed a sunny afternoon in the south, correlation ~0 with the
   stations). No model sun is shown until sky.json's scores say one beats

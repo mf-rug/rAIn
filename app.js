@@ -1454,9 +1454,12 @@ function sunSeries(pt) {
 // and only near one (WET_KM) does the headline use it. Drizzle needs opaque
 // cloud, so its "possible" spell ends where the drifted cloud field clears.
 const WET_KM = 20;
+// "recent": drizzle within the past hour but not at this moment (WaWa 22) —
+// on a drizzly day the sensor's gaps, when drops get too fine to detect.
 const wetKind = (ww) => {
   if (ww == null) return null;
   if (ww >= 50 && ww <= 58) return 'drizzle';
+  if (ww === 22) return 'recent';
   if ((ww >= 40 && ww <= 42) || (ww >= 60 && ww <= 69) || (ww >= 80 && ww <= 99)) return 'rain';
   return null;
 };
@@ -1488,8 +1491,12 @@ function wetStation(pt) {
   const last = best.pts[best.pts.length - 1];
   const fresh = last && Date.now() - last.t < 30 * 60e3;
   const c = state.sun?.cloud, v = c?.v?.[best.sid];
+  const hour = best.pts.filter((p) => last && last.t - p.t < 60 * 60e3);
+  const lastDrizzle = [...best.pts].reverse().find((p) => p.kind === 'drizzle');
   return {
-    ...best, now: fresh ? last.kind : null, nowAt: last?.t,
+    ...best, now: fresh ? last.kind : null, nowAt: last?.t, lastDrizzle: lastDrizzle?.t,
+    // Drizzle that comes and goes: a gap now, or gaps within the hour.
+    onOff: fresh && (last.kind === 'recent' || (last.kind === 'drizzle' && hour.some((p) => p.kind === 'recent'))),
     cloud: v ? { t0: Date.parse(c.t0), step: c.step * 60e3, v, clear: c.clear } : null,
   };
 }
@@ -1535,12 +1542,12 @@ function drawWetDots() {
         color: css.getPropertyValue('--muted').trim(), opacity: 0.8, fillColor: css.getPropertyValue('--paper').trim(), fillOpacity: 0.9,
       })];
     }
-    const fill = css.getPropertyValue(k === 'drizzle' ? '--drizzle' : '--rain').trim();
+    const fill = css.getPropertyValue(k === 'rain' ? '--rain' : '--drizzle').trim(), pale = k === 'recent';
     return [
-      L.circle([x.lat, x.lng], { pane: 'wet', interactive: false, radius: WET_KM * 500, stroke: false, fillColor: fill, fillOpacity: 0.28 }),
+      L.circle([x.lat, x.lng], { pane: 'wet', interactive: false, radius: WET_KM * 500, stroke: false, fillColor: fill, fillOpacity: pale ? 0.14 : 0.28 }),
       L.circleMarker([x.lat, x.lng], {
-        pane: 'wet', interactive: false, radius: 5, weight: 1.5,
-        color: css.getPropertyValue('--paper').trim(), fillColor: fill, fillOpacity: 1,
+        pane: 'wet', interactive: false, radius: pale ? 4.5 : 5, weight: 1.5,
+        color: css.getPropertyValue('--paper').trim(), fillColor: fill, fillOpacity: pale ? 0.5 : 1,
       }),
     ];
   })).addTo(map);
@@ -2133,12 +2140,12 @@ function drawGraph(series) {
       if (x1 > x0) el('rect', { x: x0, y: 6, width: x1 - x0, height: 3, class: `wet ${p.kind}` }, graph);
     }
     if (marks.length) {
-      const word = marks.some((p) => p.kind === 'drizzle') ? 'drizzle' : 'rain';
+      const word = marks.some((p) => p.kind !== 'rain') ? 'drizzle' : 'rain';
       const label = sun ? (sun.name === wst.name ? ` · ${word}` : ` · ${word} · ${wst.name}`) : `${word} · ${wst.name}`;
       if (sun) graph.lastChild.textContent += label;
       else el('text', { x: 0, y: 19, class: 'band' }, graph).textContent = label;
     }
-    if (wst.now === 'drizzle' && (series[state.nowIdx] ?? 0) < WET) {
+    if ((wst.now === 'drizzle' || wst.now === 'recent') && (series[state.nowIdx] ?? 0) < WET) {
       const until = wetUntil(wst), end = Math.min(w, until ? xOf(until) : w);
       if (end > nowX + 2) {
         const fade = el('linearGradient', { id: 'wetfade', gradientUnits: 'userSpaceOnUse', x1: nowX, y1: 0, x2: w, y2: 0 }, defs);
@@ -2305,11 +2312,13 @@ function verdictFor(ahead) {
   const wst = wetStation(state.point);
   state.stationVerdict = !!(wst?.now && !wetNow);
   if (state.stationVerdict) {
-    const clears = wetUntil(wst);
-    $('verdict').textContent = `${cap(wst.now)} now`;
-    let d = `Measured at ${wst.name} (${Math.round(wst.d)}\u00a0km) at ${hhmm(wst.nowAt)}; the radar doesn’t show it.`;
+    const clears = wetUntil(wst), where = `${wst.name} (${Math.round(wst.d)}\u00a0km)`;
+    $('verdict').textContent = wst.now === 'rain' ? 'Rain now' : wst.onOff ? 'Drizzle, on and off' : 'Drizzle now';
+    let d = wst.now === 'recent'
+      ? `${where} measured drizzle on and off over the past hour${wst.lastDrizzle ? `, last at ${hhmm(wst.lastDrizzle)}` : ''}; the radar doesn’t show it.`
+      : `Measured at ${where} at ${hhmm(wst.nowAt)}; the radar doesn’t show it.`;
     if (at >= 0) d += ` Radar rain from ${hhmm(state.frames[state.nowIdx + at].t)}.`;
-    else if (wst.now === 'drizzle' && clears && clears > Date.now()) d += ` Clearer sky around ${hhmm(clears)} would likely end it.`;
+    else if (wst.now !== 'rain' && clears && clears > Date.now()) d += ` Clearer sky around ${hhmm(clears)} would likely end it.`;
     $('detail').textContent = d;
     return;
   }

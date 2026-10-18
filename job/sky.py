@@ -386,12 +386,15 @@ def load_flow(path):
 
 
 def wet_kind(ww):
-    """WaWa code → "drizzle", "rain" or None (dry, mist, fog, past weather)."""
+    """WaWa code → "drizzle", "recent" (drizzle in the past hour, not now: 22;
+    the sensor's gaps when drops get too fine), "rain" or None."""
     if ww is None:
         return None
     ww = int(ww)
     if 50 <= ww <= 58:
         return "drizzle"
+    if ww == 22:
+        return "recent"
     if 40 <= ww <= 42 or 60 <= ww <= 69 or 80 <= ww <= 99:
         return "rain"
     return None
