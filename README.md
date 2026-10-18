@@ -27,6 +27,9 @@ with fake showery rain)
   satellite (EUMETSAT's cloud mask from Meteosat Third Generation and
   infrared, every 10 minutes, 10–20 minutes behind), moving with the wind into the forecast. The difference
   between a grey drizzly day and sun between showers, which radar can't show.
+- **Drizzle the radar misses:** KNMI stations' weather reports (drizzle, rain)
+  as dots on the map and marks on the graph; near a drizzling station the
+  headline says so, with "drizzle possible" until the clouds clear.
 - **Map:** the merged radar by default; switch to KNMI alone or DWD alone (all
   of Germany and surroundings).
   Areas without radar coverage are hatched; your country is subtly highlighted.

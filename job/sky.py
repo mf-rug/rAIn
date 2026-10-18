@@ -103,6 +103,24 @@ KEEP_DAYS = 14
 
 # Must match app.js / build.py.
 X0, Y0, X1, Y1 = 0, 6257115.396264, 1208534.924976, 7553162.131589
+W, H = 700, 751
+
+# Drizzle and rain the radar misses: drizzle falls from cloud a few hundred
+# metres up, below the radar beam, in drops too small to echo. KNMI's stations
+# report it (WaWa weather code ww). Checked on 2026-10-18, a drizzly day (32
+# stations, 02:30-15:20, 821 station-times with the MTG mask): drizzle came
+# from opaque cloud 94% of the time, and clear sky had drizzle 1 in 81, so
+# clearing cloud ends it; but opaque cloud drizzled only 18% of the time and
+# infrared doesn't tell which, so drizzle can't be read from clouds. It is
+# patchy (the nearest station, ~33 km, also drizzled 20% of the time) and it
+# lasts (still wet 60 min later 58%, vs 23% for a dry station). So the app
+# shows stations' reports (not a filled-in map) and, while a station near the
+# point drizzles, "drizzle possible" for as long as the drifted cloud field
+# keeps it under cloud. wet-log.json keeps ww, radar and cloud at each station
+# for checking this over more days.
+CLEAR_BELOW = 0.5               # cloud field value under which drizzle is unlikely (opaque cloud ≥ CLOUD_LOW)
+DRIFT_STEPS = 13                # +0..+120 min, every 10 min
+WET_KEEP_DAYS = 14
 
 
 def iso(t):
@@ -367,6 +385,57 @@ def load_flow(path):
     return (np.asarray(Image.open(path), np.float32)[..., :2] - 128) / FLOW_SCALE
 
 
+def wet_kind(ww):
+    """WaWa code → "drizzle", "rain" or None (dry, mist, fog, past weather)."""
+    if ww is None:
+        return None
+    ww = int(ww)
+    if 50 <= ww <= 58:
+        return "drizzle"
+    if 40 <= ww <= 42 or 60 <= ww <= 69 or 80 <= ww <= 99:
+        return "rain"
+    return None
+
+
+def merc(lat, lon):
+    return lon * 20037508.34 / 180, math.log(math.tan((90 + lat) * math.pi / 360)) * 6378137
+
+
+def cloud_drift(out, entries, motion, points):
+    """The newest cloud field drifted along the motion, like the app draws it,
+    sampled at points ({key: (lat, lon)}): → (field time, {key: [0..255 per
+    10 minutes, +0..+120]})."""
+    real = [e for e in entries if e.get("file")]
+    if not real or not motion or not points:
+        return None, {}
+    f = np.asarray(Image.open(out / real[-1]["file"]).convert("L"), np.float32)
+    g = load_flow(out / motion)
+    fh, fw = f.shape
+    gh, gw = g.shape[:2]
+
+    def flow(x, y):   # bilinear, field pixels per 10 minutes
+        gx = min(max(x / fw * gw - 0.5, 0), gw - 1.001)
+        gy = min(max(y / fh * gh - 0.5, 0), gh - 1.001)
+        i, j = int(gx), int(gy)
+        a, b = gx - i, gy - j
+        return ((1 - a) * (1 - b) * g[j, i] + a * (1 - b) * g[j, i + 1] + (1 - a) * b * g[j + 1, i] + a * b * g[j + 1, i + 1])
+
+    res = {}
+    for key, (lat, lon) in points.items():
+        mx, my = merc(lat, lon)
+        x = (mx - CLOUD_BBOX[0]) / (CLOUD_BBOX[2] - CLOUD_BBOX[0]) * fw
+        y = (CLOUD_BBOX[3] - my) / (CLOUD_BBOX[3] - CLOUD_BBOX[1]) * fh
+        vals, qx, qy = [], x, y
+        for k in range(DRIFT_STEPS):
+            if k:   # trace one more 10-minute step back along the motion
+                dx, dy = flow(qx, qy)
+                qx, qy = qx - dx, qy - dy
+            i, j = int(round(qx)), int(round(qy))
+            vals.append(int(f[j - 1:j + 2, i - 1:i + 2].mean()) if 1 <= i < fw - 1 and 1 <= j < fh - 1 else 0)
+        res[key] = vals
+    return real[-1]["t"], res
+
+
 def cloud_motion(out, entries):
     """Adds each field's motion towards the next one ("flow") and returns the
     motion for drifting the newest field forward: the mean of the last two
@@ -467,6 +536,37 @@ class Sky:
         self.obs = {k: v for k, v in self.obs.items() if k > iso(oldest)}
         self.missing = [k for k in self.missing if k > iso(oldest)]
 
+    def log_wet(self, mix_obs, clouds):
+        """Adds each station's weather code, radar (merged observation, max
+        over ~3 km) and cloud field value to state/wet-log.json, for the 10-minute
+        times that have all three; kept WET_KEEP_DAYS."""
+        path = self.out / "state" / "wet-log.json"
+        log = json.loads(path.read_text()) if path.exists() else {}
+        radar = {e["t"]: e["file"] for e in mix_obs or []}
+        fields = [e for e in clouds or [] if e.get("file")]
+        for t, row in sorted(self.obs.items()):
+            if t in log or t not in radar or not (self.out / radar[t]).exists():
+                continue
+            near = [e for e in fields if e["t"] <= t and parse(t) - parse(e["t"]) <= timedelta(minutes=20)]
+            if not near:
+                continue
+            a = np.asarray(Image.open(self.out / radar[t]))
+            c = np.asarray(Image.open(self.out / near[-1]["file"]).convert("L"))
+            entry = {}
+            for sid, r in row.items():
+                if r[2] is None or sid not in self.stations:
+                    continue
+                _, lat, lon = self.stations[sid]
+                mx, my = merc(lat, lon)
+                x, y = int((mx - X0) / (X1 - X0) * W), int((Y1 - my) / (Y1 - Y0) * H)
+                cx = int((mx - CLOUD_BBOX[0]) / (CLOUD_BBOX[2] - CLOUD_BBOX[0]) * c.shape[1])
+                cy = int((CLOUD_BBOX[3] - my) / (CLOUD_BBOX[3] - CLOUD_BBOX[1]) * c.shape[0])
+                entry[sid] = [int(r[2]), int(a[y - 1:y + 2, x - 1:x + 2].max()), int(c[cy - 1:cy + 2, cx - 1:cx + 2].mean())]
+            log[t] = entry
+        cutoff = iso(datetime.now(timezone.utc) - timedelta(days=WET_KEEP_DAYS))
+        log = {t: v for t, v in log.items() if t >= cutoff}
+        path.write_text(json.dumps(log, separators=(",", ":")))
+
     def sun_ids(self):
         return sorted(sid for sid in self.stations if any((r.get(sid) or [None])[0] is not None for r in self.obs.values()))
 
@@ -563,7 +663,7 @@ class Sky:
             print("sun scored", iso(h))
             h += timedelta(hours=1)
 
-    def save(self, now):
+    def save(self, now, clouds=None, motion=None):
         self.fc = {k: v for k, v in self.fc.items() if k > iso(now - timedelta(hours=14))}
         cutoff = (now - timedelta(days=KEEP_DAYS)).strftime("%Y-%m-%d")
         self.days = {d: v for d, v in self.days.items() if d >= cutoff}
@@ -581,6 +681,17 @@ class Sky:
             "n": [[(self.obs[t].get(sid) or [None, None])[1] for t in times] for sid in ids],
             "ww": [[(self.obs[t].get(sid) or [None, None, None])[2] for t in times] for sid in ids],
         }
+        # Stations reporting drizzle or rain in the last 20 minutes: the cloud
+        # field at them over the next two hours (drizzle ends when it clears).
+        wet = {sid: self.stations[sid][1:] for sid in ids
+               if any(wet_kind((self.obs[t].get(sid) or [None] * 3)[2]) for t in times[-2:])}
+        try:
+            t0, drift = cloud_drift(self.out, clouds or [], motion, wet)
+        except Exception as e:
+            print("cloud drift unavailable:", e)
+            t0, drift = None, {}
+        if drift:
+            sun["cloud"] = {"t0": t0, "step": 10, "clear": round(CLEAR_BELOW * 255), "v": drift}
         (self.out / "sun.json").write_text(json.dumps(sun, separators=(",", ":")))
 
         # Scores over the last DAYS days, per model and lead bin.

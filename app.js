@@ -581,7 +581,7 @@ let drawQueued = false;
 function requestDraw() {
   if (drawQueued) return;
   drawQueued = true;
-  requestAnimationFrame(() => { drawQueued = false; drawRadar(); drawMode(); render(); });
+  requestAnimationFrame(() => { drawQueued = false; drawRadar(); drawMode(); drawWetDots(); render(); });
 }
 
 // ---------- map ----------
@@ -1436,7 +1436,7 @@ function sunSeries(pt) {
   let best = null;
   s.stations.forEach(([, name, lat, lng], k) => {
     const d = km(lat, lng);
-    if (d <= SUN_KM && s.ss[k].some((v) => v != null) && (!best || d < best.d)) best = { name, lat, lng, d, k };
+    if (d <= SUN_KM && s.ss[k].some((v) => v != null) && (!best || d < best.d)) best = { name: shortName(name), lat, lng, d, k };
   });
   if (!best) return null;
   const pts = s.t.map((ts, j) => {
@@ -1445,6 +1445,88 @@ function sunSeries(pt) {
     return { t, v: v == null || !day ? null : Math.min(1, v / 10) };
   });
   return pts.some((p) => p.v != null) ? { name: best.name, pts } : null;
+}
+
+// ---------- drizzle and rain from stations ----------
+// Radar misses drizzle from low cloud (below the beam, drops too small to
+// echo); KNMI's stations report it in their weather code (job/sky.py, checked
+// 2026-10-18). Drizzle is patchy, so the map shows the stations themselves,
+// and only near one (WET_KM) does the headline use it. Drizzle needs opaque
+// cloud, so its "possible" spell ends where the drifted cloud field clears.
+const WET_KM = 20;
+const wetKind = (ww) => {
+  if (ww == null) return null;
+  if (ww >= 50 && ww <= 58) return 'drizzle';
+  if ((ww >= 40 && ww <= 42) || (ww >= 60 && ww <= 69) || (ww >= 80 && ww <= 99)) return 'rain';
+  return null;
+};
+
+// "Groningen Airport Eelde" → "Groningen Eelde", "Lelystad Airport" → "Lelystad".
+const shortName = (name) => name.replace(/ Airport\b/, '').trim();
+
+// Each station's reports over the past hour: [{ sid, name, lat, lng, pts: [{ t, kind }] }].
+function wetStations() {
+  const s = state.sun;
+  if (DEMO || !s?.stations || !s.ww) return [];
+  return s.stations.map(([sid, name, lat, lng], k) => ({
+    sid, name: shortName(name), lat, lng,
+    pts: s.t.map((ts, j) => ({ t: Date.parse(ts), ww: s.ww[k][j], kind: wetKind(s.ww[k][j]) })).filter((p) => p.ww != null),
+  })).filter((x) => x.pts.length);
+}
+
+// Nearest reporting station within WET_KM: its past hour, what it reports now
+// (latest report, at most 30 minutes old), and the drifted cloud over it.
+function wetStation(pt) {
+  if (!pt) return null;
+  const km = (lat, lng) => Math.hypot((lat - pt.lat) * 111.2, (lng - pt.lng) * 111.2 * Math.cos(pt.lat * Math.PI / 180));
+  let best = null;
+  for (const x of wetStations()) {
+    const d = km(x.lat, x.lng);
+    if (d <= WET_KM && (!best || d < best.d)) best = { ...x, d };
+  }
+  if (!best) return null;
+  const last = best.pts[best.pts.length - 1];
+  const fresh = last && Date.now() - last.t < 30 * 60e3;
+  const c = state.sun?.cloud, v = c?.v?.[best.sid];
+  return {
+    ...best, now: fresh ? last.kind : null, nowAt: last?.t,
+    cloud: v ? { t0: Date.parse(c.t0), step: c.step * 60e3, v, clear: c.clear } : null,
+  };
+}
+
+const wetMarks = (pt) => !!wetStation(pt)?.pts.some((p) => p.kind);
+
+// When the drifted cloud over the station clears (drizzle then usually stops), or null.
+function wetUntil(w) {
+  if (!w?.cloud) return null;
+  const i = w.cloud.v.findIndex((v) => v < w.cloud.clear);
+  return i < 0 ? null : w.cloud.t0 + i * w.cloud.step;
+}
+
+// The map: stations reporting drizzle or rain at the timeline's moment (past
+// hour up to now; nothing over the forecast).
+map.createPane('wet');
+map.getPane('wet').style.zIndex = 455;
+map.getPane('wet').style.pointerEvents = 'none';
+let wetLayer = null, wetKey = '';
+function drawWetDots() {
+  const fr = state.frames;
+  const t = fr.length && state.pos <= state.nowIdx + 0.01 ? fr[0].t + state.pos * STEP : null;
+  const on = t == null ? [] : wetStations().map((x) => {
+    // The report covering t (10-minute reports), or the latest one within 20 minutes for "now".
+    const p = x.pts.find((q) => t > q.t - 10 * 60e3 && t <= q.t) ?? (t > x.pts[x.pts.length - 1].t && t - x.pts[x.pts.length - 1].t < 20 * 60e3 ? x.pts[x.pts.length - 1] : null);
+    return p?.kind ? [x, p.kind] : null;
+  }).filter(Boolean);
+  const key = on.map(([x, k]) => x.sid + k).join() + dark.matches;
+  if (key === wetKey) return;
+  wetKey = key;
+  wetLayer?.remove();
+  const css = getComputedStyle(document.documentElement);
+  wetLayer = L.layerGroup(on.map(([x, k]) => L.circleMarker([x.lat, x.lng], {
+    pane: 'wet', interactive: false, radius: k === 'drizzle' ? 4 : 5, weight: 1.5,
+    color: css.getPropertyValue('--paper').trim(), fillOpacity: 1,
+    fillColor: css.getPropertyValue(k === 'drizzle' ? '--drizzle' : '--rain').trim(),
+  }))).addTo(map);
 }
 
 // Sun at time t from the series ("sunny", "some sun", "no sun"), or null.
@@ -1811,7 +1893,8 @@ function drawTrust(series) {
   const r = reliability(state.point);
   const p = $('trust');
   const ahead = aheadOf(series);
-  if (!r || !ahead.length || ahead.some((v) => v === null)) { p.hidden = true; return; }
+  // A station-based headline (drizzle the radar misses) has no radar reliability.
+  if (!r || !ahead.length || ahead.some((v) => v === null) || state.stationVerdict) { p.hidden = true; return; }
   p.hidden = false;
   const hours = (DEMO?.skill ?? state.skill).hours;
   const tooLittle = `Too little rain in the last ${hours} hours to judge how reliable forecasts are today.`;
@@ -2008,7 +2091,38 @@ function drawGraph(series) {
       el('rect', { x: x0, y: 1, width: x1 - x0, height: 4, class: 'sun-cloud' }, graph);
       el('rect', { x: x0, y: 1, width: x1 - x0, height: 4, class: 'sun', opacity: v }, graph);
     }
-    el('text', { x: 0, y: 15, class: 'band' }, graph).textContent = `sunshine · ${sun.name}`;
+    el('text', { x: 0, y: wetMarks(state.point) ? 19 : 15, class: 'band' }, graph).textContent = `sunshine · ${sun.name}`;
+  }
+
+  // Drizzle and rain a nearby station measured over the past hour (under the
+  // sun strip), and while it drizzles now with the radar dry here, "drizzle
+  // possible" until the drifted cloud over it clears, fading over the 2 hours.
+  const wst = wetStation(state.point);
+  if (wst && state.frames.length) {
+    const xOf = (t) => (t - state.frames[0].t) / STEP * slot + slot / 2;
+    const marks = wst.pts.filter((p) => p.kind);
+    for (const p of marks) {
+      const x0 = Math.max(0, xOf(p.t - 10 * 60e3)), x1 = Math.min(nowX - 4, xOf(p.t));
+      if (x1 > x0) el('rect', { x: x0, y: 6, width: x1 - x0, height: 3, class: `wet ${p.kind}` }, graph);
+    }
+    if (marks.length) {
+      const word = marks.some((p) => p.kind === 'drizzle') ? 'drizzle' : 'rain';
+      const label = sun ? (sun.name === wst.name ? ` · ${word}` : ` · ${word} · ${wst.name}`) : `${word} · ${wst.name}`;
+      if (sun) graph.lastChild.textContent += label;
+      else el('text', { x: 0, y: 19, class: 'band' }, graph).textContent = label;
+    }
+    if (wst.now === 'drizzle' && (series[state.nowIdx] ?? 0) < WET) {
+      const until = wetUntil(wst), end = Math.min(w, until ? xOf(until) : w);
+      if (end > nowX + 2) {
+        const fade = el('linearGradient', { id: 'wetfade', gradientUnits: 'userSpaceOnUse', x1: nowX, y1: 0, x2: w, y2: 0 }, defs);
+        el('stop', { offset: 0, 'stop-color': 'var(--drizzle)', 'stop-opacity': 0.55 }, fade);
+        el('stop', { offset: 1, 'stop-color': 'var(--drizzle)', 'stop-opacity': 0.1 }, fade);
+        const y = yOf(0.25);
+        el('rect', { x: nowX, y, width: end - nowX, height: base - y, fill: 'url(#wetfade)' }, graph);
+        el('line', { x1: nowX, x2: end, y1: y, y2: y, class: 'wet-edge' }, graph);
+        el('text', { x: nowX + 4, y: y - 4, class: 'band' }, graph).textContent = until ? 'drizzle possible, until cloud clears' : 'drizzle possible';
+      }
+    }
   }
 
   // Reliability strip under the forecast: solid where today's forecasts held
@@ -2159,6 +2273,19 @@ function verdictFor(ahead) {
   const until = ahead.length - 1;
   const endTime = hhmm(state.frames[state.nowIdx + until].t);
   const { wetNow, at, dryFrom } = turnOf(ahead);
+
+  // A nearby station measures drizzle or rain the radar doesn't show.
+  const wst = wetStation(state.point);
+  state.stationVerdict = !!(wst?.now && !wetNow);
+  if (state.stationVerdict) {
+    const clears = wetUntil(wst);
+    $('verdict').textContent = `${cap(wst.now)} now`;
+    let d = `Measured at ${wst.name} (${Math.round(wst.d)}\u00a0km) at ${hhmm(wst.nowAt)}; the radar doesn’t show it.`;
+    if (at >= 0) d += ` Radar rain from ${hhmm(state.frames[state.nowIdx + at].t)}.`;
+    else if (wst.now === 'drizzle' && clears && clears > Date.now()) d += ` Clearer sky around ${hhmm(clears)} would likely end it.`;
+    $('detail').textContent = d;
+    return;
+  }
 
   if (wetNow) {
     const j = at;

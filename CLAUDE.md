@@ -50,10 +50,13 @@ does and the data sources. This file is about how it's built and what bites.
   34–66°N, 1200×969, every 10 min; 15 with the WMS fallback), `cloud-flow-{t}-{next}.png` (motion to the
   next field) and `cloud-motion-{t}.png` (mean of the last two, for the drift);
   `index.json` → `clouds` {bbox, frames, motion}. `sun.json` (stations' 10-min
-  sunshine minutes, cloud okta, weather code for the last hour), `sky.json`
-  (sun-forecast scores per model).
+  sunshine minutes, cloud okta, weather code for the last hour; `cloud`: the
+  drifted cloud field over stations reporting drizzle/rain, +0..+120 min),
+  `sky.json` (sun-forecast scores per model).
 - **Job state** lives in `state/` on the `data` branch (run/obs coarse counts,
-  scores, compare snapshots, coverage mask), not deployed.
+  scores, compare snapshots, coverage mask; `wet-log.json`: per station every
+  10 min [weather code, merged radar byte (max ~3 km), cloud field byte], 14
+  days, for checking the drizzle feature), not deployed.
 
 ## Things that bit before (don't repeat)
 
@@ -137,6 +140,17 @@ does and the data sources. This file is about how it's built and what bites.
   its edges (fronts got squashed), hence CLAHE first and texture-weighted
   filling. The app traces the drift back in 10-minute steps (a straight jump
   smears).
+- **Radar misses drizzle from low cloud** (below the beam, drops too small).
+  KNMI stations' weather code (WaWa 50–58) catches it: 2026-10-18 Eelde
+  reported drizzle 59 of 60 min while radar was 0 around four stations.
+  Checked that day (821 station-times vs the MTG mask): drizzle under opaque
+  cloud 94%, clear sky had drizzle 1/81 (so clearing ends it), but opaque
+  cloud drizzled only 18% and infrared doesn't separate it; nearest station
+  (~33 km) agreed on drizzle only 20% (patchy: no filled-in map); still wet
+  60 min later 58% vs 23% baseline. So the app shows station dots (past hour
+  to now), strip marks, "Drizzle now" when a station ≤20 km (`WET_KM`)
+  reports it and the radar is dry here, and "drizzle possible" until the
+  drifted cloud over that station drops below `CLEAR_BELOW`.
 - **Weather models' sun at a point was poor on the first check** (2026-10-13:
   HARMONIE missed a sunny afternoon in the south, correlation ~0 with the
   stations). No model sun is shown until sky.json's scores say one beats
@@ -218,6 +232,11 @@ does and the data sources. This file is about how it's built and what bites.
   whole days; only then add a forecast sun band or a day description
   ("showers with sunny spells" vs "grey, on and off drizzle"; KNMI station
   weather codes ww separate showers from drizzle).
+- **Drizzle from stations** (since 2026-10-18, one day of evidence): after
+  ~a week, check `state/wet-log.json`: how often stations report drizzle
+  while the radar byte is 0, how often a drizzling station is still wet
+  60 min on, and whether the cloud field value ends drizzle as assumed
+  (`CLEAR_BELOW` = 0.5). Tune `WET_KM`/thresholds or drop the band if not.
 - **Touch scrubbing on iOS** was fixed with raw touch events (2026-10-11); the
   user is monitoring whether it stays fixed.
 - GitHub had an Actions incident on 2026-10-12 (push to `data` rejected with

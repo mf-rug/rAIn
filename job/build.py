@@ -332,7 +332,6 @@ def main():
             step(now)
         except Exception as e:
             print(f"sky {step.__name__}:", e)
-    sky_state.save(now)
 
     # KNMI and DWD merged: the app's default timeline (job/mix.py). Reliability
     # is scored for it, as it's what the app shows.
@@ -348,6 +347,13 @@ def main():
             print("merge unavailable:", e)
     if new_run is not None:
         verifier.add_run(ref, (mixed if mixed and len(mixed) == len(new_run) else new_run)[1:])
+
+    # Stations' weather vs radar and clouds, for checking drizzle (job/sky.py).
+    try:
+        sky_state.log_wet((mix_block or {}).get("obs"), cl)
+    except Exception as e:
+        print("wet log:", e)
+    sky_state.save(now, cl, cl_motion)
 
     index = {"generated": iso(datetime.now(timezone.utc)), "t0": iso(t0), "ref": iso(ref), "obs": obs, "fc": fc}
     if mix_block:
