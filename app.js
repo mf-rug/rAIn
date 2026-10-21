@@ -837,6 +837,7 @@ function setPoint(pt, recenter) {
   state.observed = new Map();
   loadObserved();
   loadDwdPoint();
+  loadSunForecast();
   loadBuienradar(true);
   highlightCountry(pt);
   render();
@@ -1563,6 +1564,55 @@ state.wetOn = store.get('drizzle') !== false;
 $('drizzle').setAttribute('aria-pressed', String(state.wetOn));
 $('drizzle').addEventListener('click', () => setWet(!state.wetOn));
 
+// ---------- sun forecast (ECMWF via Open-Meteo) ----------
+// On the 2026-10-21 check (sky.json), ECMWF forecast sunny hours best of five
+// models (73% right at 1–12 h); persisting the last measured hour is as good
+// for 1–3 h but falls apart after. Sun fraction per hour = direct radiation /
+// its clear-sky value, as job/sky.py scores it; only with the sun ≥ 10° up.
+const sunFc = { key: null, at: 0, hours: [] };   // [{ t: hour end, v: 0..1 }]
+const clearDni = (elev) => (elev <= 0 ? 0 : 1353 * 0.7 ** ((1 / Math.sin(Math.max(elev, 2) * Math.PI / 180)) ** 0.678));
+async function loadSunForecast() {
+  const pt = state.point;
+  if (!pt || DEMO) return;
+  const key = `${pt.lat.toFixed(2)},${pt.lng.toFixed(2)}`;
+  if (sunFc.key === key && Date.now() - sunFc.at < 30 * 60e3) return;
+  try {
+    const res = await get(`https://api.open-meteo.com/v1/forecast?latitude=${pt.lat.toFixed(2)}&longitude=${pt.lng.toFixed(2)}` +
+      '&hourly=direct_normal_irradiance&models=ecmwf_ifs025&forecast_hours=14&timezone=UTC');
+    const h = (await res.json()).hourly;
+    if (state.point !== pt) return;
+    sunFc.hours = h.time.map((ts, j) => {
+      const t = Date.parse(`${ts}Z`), el = sunElevation(t - 30 * 60e3, pt.lat, pt.lng), v = h.direct_normal_irradiance[j];
+      return { t, v: v == null || el < 10 ? null : Math.min(1, v / clearDni(el)) };
+    });
+    Object.assign(sunFc, { key, at: Date.now() });
+    render();
+  } catch (e) {
+    console.warn('sun forecast unavailable', e);
+  }
+}
+
+// The next daylight hours in words: "Sun, model forecast: grey until 14:00,
+// then sunny spells." Hidden at night or without a forecast.
+function drawSunLine() {
+  const p = $('sunline');
+  const now = Date.now();
+  const hours = sunFc.key ? sunFc.hours.filter((x) => x.t > now + 30 * 60e3 && x.v != null) : [];
+  if (hours.length < 2 || hours[0].t - now > 3 * 3600e3) { p.hidden = true; return; }
+  const level = (v) => (v >= 0.5 ? 'mostly sunny' : v >= 0.2 ? 'sunny spells' : 'grey');
+  const runs = [];
+  for (const x of hours) {
+    if (runs.length && x.t - runs[runs.length - 1].end > 3600e3) break;   // night: stop at the day's end
+    const l = level(x.v);
+    if (runs.length && runs[runs.length - 1].l === l) runs[runs.length - 1].end = x.t;
+    else runs.push({ l, start: x.t - 3600e3, end: x.t });
+  }
+  const parts = runs.map((r, i) => (i < runs.length - 1 ? `${r.l} until ${hhmm(r.end)}` : r.l));
+  const tail = runs.length === 1 ? ` until ${hhmm(runs[0].end)}` : '';
+  p.textContent = `Sun, model forecast: ${parts.join(', then ')}${tail}.`;
+  p.hidden = false;
+}
+
 // Sun at time t from the series ("sunny", "some sun", "no sun"), or null.
 function sunWord(sun, t) {
   const p = sun?.pts.find((x) => t > x.t - 10 * 60e3 && t <= x.t);
@@ -1679,6 +1729,7 @@ async function update() {
   if (t0 === state.t0 && ref === state.ref && state.frames.every((f) => f.bytes)) return;
   state.src = plan.data ? 'data' : 'wms';
   loadBuienradar(false);
+  loadSunForecast();
 
   // Keep frames we already have (observed frames never change). Flows are
   // recomputed, since a frame's neighbour may have changed.
@@ -2002,16 +2053,31 @@ function pointSeries() {
       const v = state.observed.get(f.t);
       return v !== undefined ? v : sample(f, state.point);
     }
-    return sample(f, state.point);
+    return forecastAt(f);
   });
 }
 
+// The forecast at the point: where KNMI, DWD and Buienradar all have a value,
+// their mean (best of all sources beyond ~30 min and about right in amount on
+// the 2026-10-21 benchmark: compare.py "mean3"); elsewhere the merged frame.
+// Buienradar is point-only, so the map keeps the merged frames.
+function forecastAt(f) {
+  const m = sample(f, state.point);
+  if (m == null || !state.mix) return m;
+  const kv = pointParts.knmi.get(f.t), dv = pointParts.dwd.get(f.t), bv = br.series.get(f.t);
+  return kv != null && dv != null && bv != null ? (kv + dv + bv) / 3 : m;
+}
+const pointParts = { knmi: new Map(), dwd: new Map() };
+
 function render() {
+  pointParts.knmi = knmiSeries(state.point);
+  pointParts.dwd = dwdSeries(state.point);
   const series = pointSeries();
   drawGraph(series);
   drawVerdict(series);
   fitVerdict();
   drawTrust(series);
+  drawSunLine();
   drawCompare();
   drawReadout(series);
 }
@@ -2126,6 +2192,16 @@ function drawGraph(series) {
       el('rect', { x: x0, y: 1, width: x1 - x0, height: 4, class: 'sun', opacity: v }, graph);
     }
     el('text', { x: 0, y: wetMarks(state.point) ? 19 : 15, class: 'band' }, graph).textContent = `sunshine · ${sun.name}`;
+  }
+  // Ahead: the model's sun (ECMWF), paler than the measured strip.
+  if (sunFc.key && state.frames.length) {
+    const xOf = (t) => (t - state.frames[0].t) / STEP * slot + slot / 2;
+    for (const { t, v } of sunFc.hours) {
+      const x0 = Math.max(nowX + 4, xOf(t - 3600e3)), x1 = Math.min(w, xOf(t));
+      if (v == null || x1 <= x0) continue;
+      el('rect', { x: x0, y: 1, width: x1 - x0, height: 4, class: 'sun-cloud', opacity: 0.6 }, graph);
+      el('rect', { x: x0, y: 1, width: x1 - x0, height: 4, class: 'sun', opacity: v * 0.6 }, graph);
+    }
   }
 
   // Drizzle and rain a nearby station measured over the past hour (under the

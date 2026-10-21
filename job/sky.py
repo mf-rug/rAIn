@@ -120,7 +120,7 @@ W, H = 700, 751
 # for checking this over more days.
 CLEAR_BELOW = 0.5               # cloud field value under which drizzle is unlikely (opaque cloud ≥ CLOUD_LOW)
 DRIFT_STEPS = 13                # +0..+120 min, every 10 min
-WET_KEEP_DAYS = 14
+WET_KEEP_DAYS = 45              # long enough for rare cases (cloud clearing over drizzle) and clear days
 
 
 def iso(t):
@@ -540,9 +540,13 @@ class Sky:
         self.missing = [k for k in self.missing if k > iso(oldest)]
 
     def log_wet(self, mix_obs, clouds):
-        """Adds each station's weather code, radar (merged observation, max
-        over ~3 km) and cloud field value to state/wet-log.json, for the 10-minute
-        times that have all three; kept WET_KEEP_DAYS."""
+        """Adds each station's [weather code, radar (merged observation, max
+        over ~3 km), cloud field value, cloud okta, sunshine minutes] to
+        state/wet-log.json, for the 10-minute times that have radar and a
+        cloud field; kept WET_KEEP_DAYS. Okta and sunshine (since 2026-10-21)
+        check the cloud layer over weeks (the station state keeps 13 hours);
+        entries before that have the first three only. Weather code or okta
+        can be None (not every station measures both)."""
         path = self.out / "state" / "wet-log.json"
         log = json.loads(path.read_text()) if path.exists() else {}
         radar = {e["t"]: e["file"] for e in mix_obs or []}
@@ -557,14 +561,15 @@ class Sky:
             c = np.asarray(Image.open(self.out / near[-1]["file"]).convert("L"))
             entry = {}
             for sid, r in row.items():
-                if r[2] is None or sid not in self.stations:
+                if (r[2] is None and r[1] is None) or sid not in self.stations:
                     continue
                 _, lat, lon = self.stations[sid]
                 mx, my = merc(lat, lon)
                 x, y = int((mx - X0) / (X1 - X0) * W), int((Y1 - my) / (Y1 - Y0) * H)
                 cx = int((mx - CLOUD_BBOX[0]) / (CLOUD_BBOX[2] - CLOUD_BBOX[0]) * c.shape[1])
                 cy = int((CLOUD_BBOX[3] - my) / (CLOUD_BBOX[3] - CLOUD_BBOX[1]) * c.shape[0])
-                entry[sid] = [int(r[2]), int(a[y - 1:y + 2, x - 1:x + 2].max()), int(c[cy - 1:cy + 2, cx - 1:cx + 2].mean())]
+                entry[sid] = [None if r[2] is None else int(r[2]), int(a[y - 1:y + 2, x - 1:x + 2].max()),
+                              int(c[cy - 1:cy + 2, cx - 1:cx + 2].mean()), r[1], r[0]]
             log[t] = entry
         cutoff = iso(datetime.now(timezone.utc) - timedelta(days=WET_KEEP_DAYS))
         log = {t: v for t, v in log.items() if t >= cutoff}

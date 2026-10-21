@@ -20,7 +20,10 @@ DWD's nowcast is scored too, but it only covers the eastern part of the
 Netherlands, so it gets its own set ("east"): KNMI, Buienradar and DWD on the
 places where all three made a forecast. Two consensus forecasts are scored in
 the same set: the mean of KNMI and DWD ("mean2") and of all three ("mean3"),
-to see whether combining sources beats each of them.
+to see whether combining sources beats each of them. Nationally (all
+places) the mean of KNMI and Buienradar ("kb", since 2026-10-21) is scored
+too: the app's point forecast uses all three where DWD covers, and this
+decides whether averaging in Buienradar helps where it doesn't.
 
 State in OUT/state/compare.json; summary for the app in OUT/compare.json.
 """
@@ -124,6 +127,7 @@ class Compare:
         tk = key(t)
         blank = lambda: [[0] * 6 for _ in range(LEADS + 1)]  # noqa: E731
         day = self.days.setdefault(t.strftime("%Y-%m-%d"), {"br": blank(), "knmi": blank()})
+        day.setdefault("kb", blank())
         east = day.setdefault("east", {})
         for src in ("knmi", "br", "dwd", "mean2", "mean3"):
             east.setdefault(src, blank())
@@ -159,6 +163,7 @@ class Compare:
                     continue      # only compare where both made a forecast
                 tally(day["br"][k], b[p], obs[p])
                 tally(day["knmi"][k], kn[p], obs[p])
+                tally(day["kb"][k], (kn[p] + b[p]) / 2, obs[p])
                 if d and d[p] is not None:
                     tally(east["knmi"][k], kn[p], obs[p])
                     tally(east["br"][k], b[p], obs[p])
@@ -197,8 +202,9 @@ class Compare:
                 })
             return rows
 
-        for src in ("knmi", "br"):
-            summary[src] = rows_for(lambda v: v[src])
+        blank = [[0] * 6 for _ in range(LEADS + 1)]
+        for src in ("knmi", "br", "kb"):
+            summary[src] = rows_for(lambda v: v.get(src, blank))
         blank = [[0] * 6 for _ in range(LEADS + 1)]
         for src in ("knmi", "br", "dwd", "mean2", "mean3"):
             summary["east"][src] = rows_for(lambda v: v.get("east", {}).get(src, blank))

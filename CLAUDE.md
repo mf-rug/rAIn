@@ -55,8 +55,9 @@ does and the data sources. This file is about how it's built and what bites.
   `sky.json` (sun-forecast scores per model).
 - **Job state** lives in `state/` on the `data` branch (run/obs coarse counts,
   scores, compare snapshots, coverage mask; `wet-log.json`: per station every
-  10 min [weather code, merged radar byte (max ~3 km), cloud field byte], 14
-  days, for checking the drizzle feature), not deployed.
+  10 min [weather code, merged radar byte (max ~3 km), cloud field byte,
+  okta, sunshine min] (okta/sunshine since 2026-10-21; ww or okta may be
+  null), 45 days, for checking drizzle and the cloud layer), not deployed.
 
 ## Things that bit before (don't repeat)
 
@@ -206,20 +207,26 @@ does and the data sources. This file is about how it's built and what bites.
   DWD .57/.43/.34/.27, mean2 (KNMI+DWD ≈ the merged default) .66/.47/.37/.30,
   mean3 (all three) .65/.48/.38/.32 (bias ~1.0). Per day: mean2 beat KNMI
   6/6 at 95–120 but only 3/6 at 35–60 (ties); mean3 never worst. → Merged
-  default kept. Option raised: mean3 for the point (graph/headline), since
-  Buienradar exists only per point (no map).
+  default kept. Since 2026-10-21 the point forecast (graph, headline) is
+  mean3 where KNMI, DWD and Buienradar all have a value (`forecastAt`;
+  Buienradar is point-only, so the map stays merged). Elsewhere (west, no
+  DWD) it stays merged = KNMI; compare.py now scores "kb" (KNMI+Buienradar)
+  nationally to decide whether to average Buienradar in there too.
   **Sun:** ECMWF best (MAE 0.19, sunny-hour CSI .73 at 1–12 h), ICON-D2 next,
   HARMONIE (knmi_seamless) worst (.23/.52); persistence .21/.64 at 1–3 h then
   collapses (.31/.49 at 4–6 h). Caveat: persistence is scored on fewer hours
-  (needs the last measured hour) than the models. → A model sun band
-  (ECMWF) is defensible beyond ~3 h; offered, not built.
+  (needs the last measured hour) than the models. → Since 2026-10-21 the
+  app shows ECMWF's sun (Open-Meteo, fetched by the app): a paler strip
+  after "now" and a line for the rest of the daylight ("grey until 14:00,
+  then sunny spells"), same sun fraction as sky.py scores.
   **Drizzle (wet-log, 3 days, 13.7k station-times):** 46% of drizzle reports
   had radar 0 (WaWa 22: 95%); clear cloud field (<128) had drizzle 4 of 3677;
   drizzling stations still wet 60 min on 74% (dry → wet 6%). "Clearing ends
   it" untested (cloud cleared within 60 min only 9 times). → Feature kept.
   **Clouds vs stations (13 h, 2026-10-21, mostly overcast again):** overcast
-  caught 84% by day, 80% at night; only 34 clear samples, so the clear/mixed
-  day re-check is still open.
+  caught 84% by day, 80% at night; only 34 clear samples: the station state
+  keeps 13 h of okta, so wet-log now logs okta and sunshine (45 days) for a
+  re-check over weeks, clear days included.
 - **Clouds now come from MTG's mask** (see above; switched 2026-10-13, one
   day of station checks, mostly overcast: re-check on a clear and a mixed
   day). Later options (not started): shading from cloud-top height instead
@@ -244,13 +251,14 @@ does and the data sources. This file is about how it's built and what bites.
   frames); words and sentences use the unsmoothed values. Thresholds (`SCALE`,
   `DRY_BINS`, "held up" = 0.6) are educated guesses; an offline test on KNMI's
   archive (forecasts since 2024-08) could tune them.
-- **Sky:** cloud layer, measured-sunshine strip, map label are live; model
-  sun scores in `sky.json` (results above). A forecast sun band or a day
-  description ("showers with sunny spells" vs "grey, on and off drizzle") is
-  the next step if wanted.
+- **Sky:** cloud layer, measured-sunshine strip, ECMWF sun strip and line
+  are live; model sun scores keep running in `sky.json`.
 - **Drizzle from stations** (since 2026-10-18; first check above). Still
   open: whether clearing cloud ends drizzle (`CLEAR_BELOW`), needs cases
-  where the cloud clears over a drizzling station.
+  where the cloud clears over a drizzling station (log kept 45 days now).
+- **Next check (~2026-11-04):** wet-log for cloud layer vs okta (clear and
+  mixed days) and drizzle-ends-when-clear; compare.json `kb` vs `knmi`
+  nationally; ECMWF vs persistence on the same hours.
 - **Touch scrubbing on iOS** was fixed with raw touch events (2026-10-11); the
   user is monitoring whether it stays fixed.
 - GitHub had an Actions incident on 2026-10-12 (push to `data` rejected with

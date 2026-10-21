@@ -27,6 +27,8 @@ with fake showery rain)
   satellite (EUMETSAT's cloud mask from Meteosat Third Generation and
   infrared, every 10 minutes, 10–20 minutes behind), moving with the wind into the forecast. The difference
   between a grey drizzly day and sun between showers, which radar can't show.
+- **Sun ahead:** ECMWF's sun forecast (via Open-Meteo) as a paler strip after
+  "now" and a line for the rest of the daylight.
 - **Drizzle the radar misses:** KNMI stations' weather reports (drizzle, rain)
   as dots on the map and marks on the graph; near a drizzling station the
   headline says so, with "drizzle possible" until the clouds clear.
