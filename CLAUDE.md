@@ -196,8 +196,30 @@ does and the data sources. This file is about how it's built and what bites.
 - GitHub disables scheduled workflows after 60 days without commits; the
   cron-job.org trigger is unaffected.
 
-## Status and open threads (as of 2026-10-13)
+## Status and open threads (as of 2026-10-21)
 
+- **Benchmarks after ~10 days (checked 2026-10-21; rainy days 10-13, 16, 17,
+  18, 20, 21; all scored against KNMI's gauge-corrected radar, which favours
+  KNMI and penalises DWD/consensus, so their gains are conservative).** East
+  set, CSI (rain ≥0.3 mm/h) at 5–30 / 35–60 / 65–90 / 95–120 min:
+  KNMI .67/.45/.35/.28, Buienradar .52/.42/.34/.31 (bias ~1.15, too wet),
+  DWD .57/.43/.34/.27, mean2 (KNMI+DWD ≈ the merged default) .66/.47/.37/.30,
+  mean3 (all three) .65/.48/.38/.32 (bias ~1.0). Per day: mean2 beat KNMI
+  6/6 at 95–120 but only 3/6 at 35–60 (ties); mean3 never worst. → Merged
+  default kept. Option raised: mean3 for the point (graph/headline), since
+  Buienradar exists only per point (no map).
+  **Sun:** ECMWF best (MAE 0.19, sunny-hour CSI .73 at 1–12 h), ICON-D2 next,
+  HARMONIE (knmi_seamless) worst (.23/.52); persistence .21/.64 at 1–3 h then
+  collapses (.31/.49 at 4–6 h). Caveat: persistence is scored on fewer hours
+  (needs the last measured hour) than the models. → A model sun band
+  (ECMWF) is defensible beyond ~3 h; offered, not built.
+  **Drizzle (wet-log, 3 days, 13.7k station-times):** 46% of drizzle reports
+  had radar 0 (WaWa 22: 95%); clear cloud field (<128) had drizzle 4 of 3677;
+  drizzling stations still wet 60 min on 74% (dry → wet 6%). "Clearing ends
+  it" untested (cloud cleared within 60 min only 9 times). → Feature kept.
+  **Clouds vs stations (13 h, 2026-10-21, mostly overcast again):** overcast
+  caught 84% by day, 80% at night; only 34 clear samples, so the clear/mixed
+  day re-check is still open.
 - **Clouds now come from MTG's mask** (see above; switched 2026-10-13, one
   day of station checks, mostly overcast: re-check on a clear and a mixed
   day). Later options (not started): shading from cloud-top height instead
@@ -209,37 +231,26 @@ does and the data sources. This file is about how it's built and what bites.
   forecast beyond the drift (only if the sun scoring shows skill). The app
   drifts the newest field to now ("drifted" label; ~10–20 min with MTG).
   EUMETSAT's WMS sometimes lacks a slot or answers 500; the job retries each run.
-- **Merged is the default since 2026-10-13** (user's call, before the
-  benchmark is in). Known cost: averaging spreads rain out (wider, weaker,
+- **Merged is the default since 2026-10-13** (user's call; the 2026-10-21
+  benchmark supports keeping it, see above). Known cost: averaging spreads rain out (wider, weaker,
   earlier starts where the two disagree; 0.3 + 0 → 0.15 = the rain threshold).
   The benchmark below decides whether to keep it. "Both" on the map = merged
   frames on KNMI's grid plus DWD's frames around them (union of both areas).
-- **Consensus forecasts** (`mean2` = KNMI+DWD, `mean3` = all three) are being
-  scored in compare.py's `east` set since 2026-10-12 (no rain yet on day one).
-  compare.json's 7-day window still mixes in pre-consensus days for KNMI/DWD
-  until ~2026-10-19; for a fair comparison use only moments all five have.
-- **First head-to-head (3 days, 2026-10-09…12):** KNMI best up to ~30 min (part
-  head start: scored against its own observations); Buienradar too wet (bias
-  ~1.2–1.3) but beats KNMI beyond ~90 min as KNMI's smoothing dries out; DWD
-  (east only) slightly better than KNMI from ~1 h on.
+- **Consensus forecasts** (`mean2`, `mean3`) are scored in compare.py's
+  `east` set since 2026-10-12 (results above).
 - **Reliability** is rain/dry split with dry-by-distance classes; verify.py
   scores the merged forecast since 2026-10-13. The fades (strip, curve, map
   radar, clouds) all use one smoothed confidence (`confSeries`, Gaussian 3
   frames); words and sentences use the unsmoothed values. Thresholds (`SCALE`,
   `DRY_BINS`, "held up" = 0.6) are educated guesses; an offline test on KNMI's
   archive (forecasts since 2024-08) could tune them.
-- **Sky:** cloud layer (cloud field, see above), measured-sunshine strip, map
-  label measured/now/forecast are live. The job scores 5 models' hourly sun
-  forecasts (and persistence) against the stations in `sky.json`. After a
-  week (~2026-10-20), check which (if any) beats persistence at 1–3 h and on
-  whole days; only then add a forecast sun band or a day description
-  ("showers with sunny spells" vs "grey, on and off drizzle"; KNMI station
-  weather codes ww separate showers from drizzle).
-- **Drizzle from stations** (since 2026-10-18, one day of evidence): after
-  ~a week, check `state/wet-log.json`: how often stations report drizzle
-  while the radar byte is 0, how often a drizzling station is still wet
-  60 min on, and whether the cloud field value ends drizzle as assumed
-  (`CLEAR_BELOW` = 0.5). Tune `WET_KM`/thresholds or drop the band if not.
+- **Sky:** cloud layer, measured-sunshine strip, map label are live; model
+  sun scores in `sky.json` (results above). A forecast sun band or a day
+  description ("showers with sunny spells" vs "grey, on and off drizzle") is
+  the next step if wanted.
+- **Drizzle from stations** (since 2026-10-18; first check above). Still
+  open: whether clearing cloud ends drizzle (`CLEAR_BELOW`), needs cases
+  where the cloud clears over a drizzling station.
 - **Touch scrubbing on iOS** was fixed with raw touch events (2026-10-11); the
   user is monitoring whether it stays fixed.
 - GitHub had an Actions incident on 2026-10-12 (push to `data` rejected with
