@@ -234,7 +234,7 @@ does and the data sources. This file is about how it's built and what bites.
 - **Merged is the default since 2026-10-13** (user's call; the 2026-10-21
   benchmark supports keeping it, see above). Known cost: averaging spreads rain out (wider, weaker,
   earlier starts where the two disagree; 0.3 + 0 → 0.15 = the rain threshold).
-  The benchmark below decides whether to keep it. "Both" on the map = merged
+  "Both" on the map = merged
   frames on KNMI's grid plus DWD's frames around them (union of both areas).
 - **Consensus forecasts** (`mean2`, `mean3`) are scored in compare.py's
   `east` set since 2026-10-12 (results above).
