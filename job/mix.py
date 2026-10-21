@@ -101,9 +101,9 @@ def build(out, obs, fc, ref, dwd_meta, kvalid):
     load = lambda name: np.array(Image.open(out / name))  # noqa: E731
 
     dvalid = np.zeros((H, W), bool)
-    if use:
+    dobs = {e["t"]: e["file"] for e in m["obs"]} if m else {}
+    if m:
         rows, cols, inside = dwd_lookup(m)
-        dobs = {e["t"]: e["file"] for e in m["obs"]}
         base = dobs.get(dwd_meta["ref"])
         if base and (out / base).exists():
             dvalid = inside & (load(base)[rows, cols] != 255)
@@ -112,7 +112,7 @@ def build(out, obs, fc, ref, dwd_meta, kvalid):
 
     def on_grid(name):
         """A DWD map frame on KNMI's grid (255 = no data), or None."""
-        if not use or not name or not (out / name).exists():
+        if not m or not name or not (out / name).exists():
             return None
         g = load(name)[rows, cols]
         g[~inside] = 255
@@ -120,18 +120,28 @@ def build(out, obs, fc, ref, dwd_meta, kvalid):
 
     wk, wd = ramp(kvalid), ramp(dvalid)
 
-    # Past hour: KNMI where it covers, DWD outside.
+    # Past hour: KNMI where it covers, DWD's analysis of the same moment
+    # outside (whenever it exists: the staleness rule is for forecasts). A
+    # frame made before DWD's analysis was in is made again once it is: the
+    # name says whether DWD is in it ("-d"). Until 2026-10-21 frames were made
+    # once, so some stayed KNMI-only: a rainless rectangle (KNMI's grid) inside
+    # DWD's rain on the map, flickering from frame to frame.
     mix_obs = []
     for e in obs:
-        name = f"mix-obs-{e['t'][:16].replace('-', '').replace(':', '').replace('T', '')}.png"
+        stem = f"mix-obs-{e['t'][:16].replace('-', '').replace(':', '').replace('T', '')}"
+        dname = dobs.get(e["t"])
+        has_d = bool(m and dname and (out / dname).exists())
+        name = f"{stem}-d.png" if has_d else f"{stem}.png"
         if not (out / name).exists():
             k = load(e["file"])
-            d = on_grid(dobs.get(e["t"])) if use else None
+            d = on_grid(dname) if has_d else None
             if d is not None:
                 fill = ~kvalid & (d != 255)
                 k = k.copy()
                 k[fill] = d[fill]
             Image.fromarray(k, "L").save(out / name, optimize=True)
+            if has_d:
+                (out / f"{stem}.png").unlink(missing_ok=True)
         mix_obs.append({"t": e["t"], "file": name})
 
     # Forecast: weighted mean where both cover.
