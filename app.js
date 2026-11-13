@@ -7,12 +7,26 @@
 const WMS = 'https://anonymous.api.dataplatform.knmi.nl/wms/adaguc-server';
 // Frames prepared every 5 minutes by job/build.py (GitHub Actions) and deployed
 // with the site under data/, one small greyscale PNG each. Used whenever fresh;
-// KNMI's WMS is the fallback. (Not raw.githubusercontent.com: its CDN serves a
-// stale index for minutes after each update.)
+// KNMI's WMS is the fallback. (Not raw.githubusercontent.com first: its CDN
+// serves a stale index for minutes after each update.) But when Pages itself
+// is stale, the data branch via raw.githubusercontent.com is the second
+// choice before the WMS: on 2026-11-13 (two days after a GitHub outage)
+// Pages accepted deployments without publishing them, while the branch was
+// current (and the WMS has no DWD). DATA is the base in use; fetchPlan sets it.
 // Local development (localhost) reads the live site's data.
-const DATA = /^(localhost|127\.0\.0\.1)$/.test(location.hostname)
+const PAGES_DATA = /^(localhost|127\.0\.0\.1)$/.test(location.hostname)
   ? 'https://mf-rug.github.io/rAIn/data/'
   : new URL('data/', location.href).href;
+// The branch is replaced on every run (old frames deleted) and raw's CDN
+// caches for minutes, so an index and its frames can come from different
+// commits: read one commit, pinned by its id (GitHub API, 60 requests/hour
+// without login; only asked while Pages is stale).
+async function branchData() {
+  const res = await fetch('https://api.github.com/repos/mf-rug/rAIn/commits/data', { headers: { Accept: 'application/vnd.github.sha' }, cache: 'no-store' });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return `https://raw.githubusercontent.com/mf-rug/rAIn/${(await res.text()).trim()}/`;
+}
+let DATA = PAGES_DATA;
 const DATA_STALE = 20 * 60e3;
 const STYLE = 'precip-smooth-white-to-purple/bilinear';
 const OBS = { dataset: 'radar_reflectivity_composites', layer: 'precipitation' };
@@ -1657,12 +1671,22 @@ async function refresh() {
 // Latest times and where to get each frame: the job's index when fresh,
 // otherwise KNMI's WMS.
 async function fetchPlan() {
+  const plan = await planFrom(PAGES_DATA) ?? await branchData().then(planFrom).catch((e) => console.warn('data branch unavailable', e));
+  if (plan) return plan;
+  const [obs, fc] = await Promise.all([latestTimes(OBS), latestTimes(FC)]);
+  return { t0: obs.time, ref: fc.ref ?? obs.time, data: null };
+}
+
+// The job's index at base, if fresh: the plan, with DATA set to base.
+async function planFrom(base) {
   try {
-    const res = await fetch(`${DATA}index.json?v=${Math.floor(Date.now() / 30e3)}`, { cache: 'no-store' });
+    const res = await fetch(`${base}index.json?v=${Math.floor(Date.now() / 30e3)}`, { cache: 'no-store' });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const idx = await res.json();
     const t0 = Date.parse(idx.t0);
     if (Date.now() - t0 < DATA_STALE) {
+      if (DATA !== base) console.warn(`reading the job's data from ${base}`);
+      DATA = base;
       const entries = (list, kind) => list.map((e) => [`${kind}|${Date.parse(e.t)}`, DATA + e.file]);
       const extra = (name) => fetch(`${DATA}${name}?v=${Math.floor(Date.now() / 30e3)}`, { cache: 'no-store' })
         .then((r) => (r.ok ? r.json() : null)).catch(() => null);
@@ -1672,14 +1696,13 @@ async function fetchPlan() {
       const m = idx.mix;
       const data = m ? [...entries(m.obs, 'obs'), ...entries(m.fc, 'fc')] : [...entries(idx.obs, 'obs'), ...entries(idx.fc, 'fc')];
       const knmi = m ? { obs: idx.obs, fc: idx.fc, win: m.knmi_win, ref: m.knmi_ref, geom: m.win } : null;
-      return { t0, ref: Date.parse(idx.ref), data, mix: !!m, mixDwd: m?.dwd ?? null, mixCoverage: m?.coverage ?? null, knmi, skill, coverage, compare, dwd, sun, clouds: idx.clouds ?? null };
+      return { t0, ref: Date.parse(idx.ref), base, data, mix: !!m, mixDwd: m?.dwd ?? null, mixCoverage: m?.coverage ?? null, knmi, skill, coverage, compare, dwd, sun, clouds: idx.clouds ?? null };
     }
-    console.warn('job output is stale; using KNMI directly');
+    console.warn(`job output at ${base} is stale`);
   } catch (e) {
-    console.warn('job output unavailable; using KNMI directly', e);
+    console.warn(`job output at ${base} unavailable`, e);
   }
-  const [obs, fc] = await Promise.all([latestTimes(OBS), latestTimes(FC)]);
-  return { t0: obs.time, ref: fc.ref ?? obs.time, data: null };
+  return null;
 }
 
 // The timeline is a regular 5-minute grid; any frame the job lacks comes from the WMS.
@@ -1703,6 +1726,7 @@ async function update() {
   try {
     // Fresh page, but nothing newer can have been published yet: reuse.
     plan = !state.t0 && known && Date.now() < dueAfter(known.t0, known.ref) ? known : await fetchPlan();
+    if (plan.base) DATA = plan.base;   // a stored plan read from the branch keeps reading there
     wanted = planFrames(plan);
     if (!state.lut && wanted.some((f) => f.src === 'wms')) state.lut = await loadLegend();
   } catch (e) {

@@ -68,7 +68,13 @@ does and the data sources. This file is about how it's built and what bites.
   repeat a bogus 0.036). It is exact for observations. The WMS fallback reads
   forecast values back from rendered frames via the legend colours.
 - **raw.githubusercontent.com serves a stale index for minutes** after a push
-  → data is deployed with Pages instead (deploys purge the CDN).
+  → data is deployed with Pages instead (deploys purge the CDN). But Pages can
+  stall too: on 2026-11-13 it reported deployments as successful without
+  publishing them (served copy stuck at 07:49 UTC), and the app fell back to
+  KNMI's WMS (no DWD). Now a stale Pages index makes the app read the `data`
+  branch pinned to one commit (`branchData`: GitHub API for the commit id,
+  then raw.githubusercontent.com/<sha>/; unpinned, index and frames came
+  from different commits → 404s). Only then the WMS.
 - **Buienradar's RainHistoryForecast starts with ~3 observed steps**, then a gap,
   then the forecast. Its first step is not its issue time. compare.py anchors all
   sources at the same moment F (snapshot) instead.
